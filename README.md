@@ -40,41 +40,59 @@ cp .env.example .env.local
 
 ### 2. Supabase
 
-Opret et projekt på [supabase.com](https://supabase.com), og kør derefter i
-SQL-editoren:
+Kampagneappen skal have **sit eget Supabase-projekt**. `auth.users` er én tabel
+per projekt, så deler du projekt med en anden app, deler du også brugerdatabase
+— og RLS her hænger på `brand_members`.
 
-1. `supabase/migrations/0001_init.sql`
-2. `supabase/seed.sql` (opretter de to kunder — ret navnene til)
-
-Opret en **public** storage bucket, fx `kampagne-assets`. Den skal være public:
-Meta henter selv billedet fra URL'en og kan ikke logge ind.
-
-Log ind i appen én gang, find dit bruger-id under Authentication → Users, og
-giv dig selv adgang til begge kunder:
-
-```sql
-insert into brand_members (brand_id, user_id, role)
-select id, '<dit-auth-uid>', 'owner' from brands;
-```
-
-### 3. Nøgler i `.env.local`
+Hent et personal access token på
+[supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens):
 
 ```bash
-# Krypteringsnøgle til Meta-tokens
-openssl rand -base64 32
+export SUPABASE_ACCESS_TOKEN=sbp_...
 
-# Hemmelighed der beskytter cron-endpointet
-openssl rand -hex 32
+npm run db:create   # opretter projektet og skriver .env.local
+npm run db:setup    # tabeller, RLS, de to kunder, public storage-bucket
+```
+
+`db:create` viser hvad den vil oprette og venter på et **ja**, før den gør
+noget. Den genererer databaseadgangskode, `TOKEN_ENCRYPTION_KEY` og
+`CRON_SECRET` lokalt og lægger dem i `.env.local` med filrettighed `600`.
+
+`db:setup` kan køres igen — anvendte migrationer noteres i
+`schema_migrations`, og seed springes over hvis der allerede er kunder.
+
+Har du allerede et projekt, så spring `db:create` over og sæt
+`SUPABASE_PROJECT_REF` i `.env.local` før `db:setup`.
+
+Access tokenet hører hjemme i din shell, ikke i `.env.local` — det giver fuld
+adgang til alle dine Supabase-projekter, mens appen kun har brug for
+API-nøglerne.
+
+### 3. Resten af `.env.local`
+
+`db:create` udfylder det meste. Du mangler kun:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Lad `PUBLISH_DRY_RUN=true` stå indtil du har set opslagene i loggen og er
-tilfreds. Så er der ingen vej til at komme til at publicere ved et uheld.
+tilfreds. Så kan du ikke komme til at publicere ved et uheld.
 
 ### 4. Kør
 
 ```bash
 npm run dev
 ```
+
+Log ind med din mail (magic link), og giv derefter brugeren adgang til kunderne:
+
+```bash
+npm run db:grant din@mail.dk
+```
+
+Rækkefølgen er med vilje: brugeren findes først i `auth.users` efter første
+login.
 
 ---
 
@@ -152,6 +170,17 @@ npm run test:publish   # kryptering, dry-run, Instagram-regler — intet netvær
 npm run typecheck
 npm run build
 ```
+
+## Scripts
+
+| Kommando | Gør |
+|---|---|
+| `npm run db:create` | Opretter et nyt Supabase-projekt og skriver `.env.local` |
+| `npm run db:setup` | Kører migrationer + seed, opretter storage-bucket |
+| `npm run db:grant <email>` | Giver en bruger adgang til alle kunder |
+| `npm run test:publish` | Røgtest af kryptering, dry-run og Instagram-regler |
+
+De tre `db:`-scripts kræver `SUPABASE_ACCESS_TOKEN` i miljøet.
 
 `test:publish` kaprer `fetch` under dry-run-testen, så testen fejler hvis koden
 alligevel prøver at ringe til Meta.
