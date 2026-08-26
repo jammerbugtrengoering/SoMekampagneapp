@@ -1,12 +1,26 @@
-node_modules/
-.next/
-out/
-build/
+# Logs
+logs
+*.log
+npm-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.netlify
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.sw?
+
+# Miljøvariabler
+# Modsat de to andre apps er .env IKKE committet her. Filen indeholder
+# ANTHROPIC_API_KEY, TOKEN_ENCRYPTION_KEY og CRON_SECRET, som ikke er
+# offentlige — sæt dem i Netlify UI under Environment variables.
 .env
 .env.local
-.env*.local
-.netlify/
-.DS_Store
-*.tsbuildinfo
-next-env.d.ts
-.transfer.tgz
+.env.*.local

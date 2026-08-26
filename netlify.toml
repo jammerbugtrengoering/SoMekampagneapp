@@ -1,12 +1,24 @@
 [build]
   command = "npm run build"
-  publish = ".next"
+  publish = "dist"
+  functions = "netlify/functions"
 
-[[plugins]]
-  package = "@netlify/plugin-nextjs"
+# /api/* peger på funktionerne. Skal stå FØR SPA-reglen nedenfor,
+# ellers sluger index.html også API-kaldene.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+  force = true
 
-# Kører hvert 15. minut og publicerer opslag hvis planlagte tid er passeret.
-[functions."scheduled-publish"]
+# SPA: alle andre ruter serveres af index.html.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Kører hvert 15. minut og publicerer godkendte opslag hvis tiden er passeret.
+[functions."planlagt-publicering"]
   schedule = "*/15 * * * *"
 
 [build.environment]
