@@ -50,19 +50,26 @@ Hent et personal access token på
 ```bash
 export SUPABASE_ACCESS_TOKEN=sbp_...
 
-npm run db:create   # opretter projektet og skriver .env.local
+npm run db:link     # projektet findes allerede — henter nøgler, skriver .env.local
 npm run db:setup    # tabeller, RLS, de to kunder, public storage-bucket
 ```
 
-`db:create` viser hvad den vil oprette og venter på et **ja**, før den gør
-noget. Den genererer databaseadgangskode, `TOKEN_ENCRYPTION_KEY` og
-`CRON_SECRET` lokalt og lægger dem i `.env.local` med filrettighed `600`.
+Projektet hedder **SoMePlanning App**. `db:link` finder det på navn, henter
+anon- og service-nøglen, og skriver `.env.local` med filrettighed `600`. Har du
+flere projekter der ligner hinanden, spørger den hvilket. Værdier du selv har
+sat — `ANTHROPIC_API_KEY`, `TOKEN_ENCRYPTION_KEY`, `CRON_SECRET` — bevares.
+
+Skal du oprette et projekt fra bunden i stedet:
+
+```bash
+npm run db:create "SoMePlanning App"
+```
+
+Den viser hvad den vil oprette og venter på et **ja**, genererer selv
+databaseadgangskoden, og venter til projektet er klar.
 
 `db:setup` kan køres igen — anvendte migrationer noteres i
 `schema_migrations`, og seed springes over hvis der allerede er kunder.
-
-Har du allerede et projekt, så spring `db:create` over og sæt
-`SUPABASE_PROJECT_REF` i `.env.local` før `db:setup`.
 
 Access tokenet hører hjemme i din shell, ikke i `.env.local` — det giver fuld
 adgang til alle dine Supabase-projekter, mens appen kun har brug for
@@ -175,7 +182,8 @@ npm run build
 
 | Kommando | Gør |
 |---|---|
-| `npm run db:create` | Opretter et nyt Supabase-projekt og skriver `.env.local` |
+| `npm run db:link [navn]` | Finder et eksisterende Supabase-projekt og skriver `.env.local` |
+| `npm run db:create [navn]` | Opretter et nyt Supabase-projekt og skriver `.env.local` |
 | `npm run db:setup` | Kører migrationer + seed, opretter storage-bucket |
 | `npm run db:grant <email>` | Giver en bruger adgang til alle kunder |
 | `npm run test:publish` | Røgtest af kryptering, dry-run og Instagram-regler |

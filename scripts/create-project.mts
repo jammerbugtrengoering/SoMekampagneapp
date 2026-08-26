@@ -26,7 +26,7 @@ import {
   type Organization,
 } from './lib/mgmt.mts'
 
-const PROJECT_NAME = process.env.PROJECT_NAME ?? 'kampagneapp'
+const PROJECT_NAME = process.env.PROJECT_NAME ?? process.argv[2] ?? 'SoMePlanning App'
 const ENV_PATH = resolve(process.cwd(), '.env.local')
 
 const rl = createInterface({ input: process.stdin, output: process.stdout })

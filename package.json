@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test:publish": "tsx scripts/test-publish.mts",
     "db:create": "tsx scripts/create-project.mts",
+    "db:link": "tsx scripts/link-project.mts",
     "db:setup": "tsx scripts/setup-db.mts",
     "db:grant": "tsx scripts/grant-access.mts"
   },
