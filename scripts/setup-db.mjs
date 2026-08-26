@@ -10,7 +10,9 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { findProjektRef, hentNoegler, koerSql, kraevToken, laesEnv } from './lib/mgmt.mjs'
+import {
+  findHemmeligNoegle, findProjektRef, hentNoegler, koerSql, kraevToken, laesEnv,
+} from './lib/mgmt.mjs'
 
 const MIGRATIONER = resolve(process.cwd(), 'supabase/migrations')
 const SEED = resolve(process.cwd(), 'supabase/seed.sql')
@@ -72,13 +74,20 @@ async function main() {
   // ikke logge ind. Det er et bevidst valg, ikke en forglemmelse.
   const bucket = env.SUPABASE_STORAGE_BUCKET || 'kampagne-assets'
   const noegler = await hentNoegler(ref, token)
-  const service = noegler.find((n) => n.name === 'service_role')?.api_key
+  const service = findHemmeligNoegle(noegler)
 
   if (service) {
     process.stdout.write(`Storage-bucket "${bucket}" … `)
+    // Begge headere med SAMME værdi. En sb_secret_-nøgle må ikke stå alene i
+    // Authorization: Bearer — kun hvis apikey er identisk. Og en gammel
+    // service_role-JWT skal have Authorization. Sådan virker begge slags.
     const svar = await fetch(`https://${ref}.supabase.co/storage/v1/bucket`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${service}`, 'Content-Type': 'application/json' },
+      headers: {
+        apikey: service,
+        Authorization: `Bearer ${service}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({ id: bucket, name: bucket, public: true }),
     })
     const krop = await svar.text()

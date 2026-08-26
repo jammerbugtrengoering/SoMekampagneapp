@@ -112,4 +112,18 @@ export const koerSql = (ref, token, sql) =>
 export const hentNoegler = (ref, token) =>
   kald('GET', `/v1/projects/${ref}/api-keys?reveal=true`, token)
 
+/**
+ * Finder en nøgle der bypasser RLS — sb_secret_… hvis den findes, ellers den
+ * gamle service_role. Endpointet navngiver dem forskelligt afhængigt af
+ * hvornår projektet er oprettet, så vi kigger både på navn og på præfiks.
+ */
+export function findHemmeligNoegle(noegler) {
+  return (
+    noegler.find((n) => n.api_key?.startsWith('sb_secret_'))?.api_key ??
+    noegler.find((n) => n.name === 'service_role')?.api_key ??
+    noegler.find((n) => n.type === 'secret')?.api_key ??
+    null
+  )
+}
+
 export { kald }

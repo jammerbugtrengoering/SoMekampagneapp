@@ -3,7 +3,7 @@ import {
   AlertTriangle, Calendar, Check, ChevronLeft, ChevronRight, Image as ImageIcon,
   Loader2, LogOut, Plus, RefreshCw, Send, Sparkles, Trash2, Users, X,
 } from "lucide-react";
-import { supabase, kaldApi } from "./supabaseClient";
+import { supabase, kaldApi, opsaetningsfejl } from "./supabaseClient";
 
 /* =====================================================================
    Kampagneapp — planlægger og publicerer opslag for flere kunder.
@@ -72,6 +72,33 @@ const manglerBillede = (opslag) =>
    ===================================================================== */
 
 export default function App() {
+  // Uden Supabase-variablerne kan resten af appen ikke starte. Vis hvad der
+  // mangler i stedet for en hvid side.
+  if (opsaetningsfejl) return <Opsaetningsfejl besked={opsaetningsfejl} />;
+
+  return <AppMedSession />;
+}
+
+function Opsaetningsfejl({ besked }) {
+  return (
+    <div style={styles.loginWrap}>
+      <div style={styles.loginKort}>
+        <AlertTriangle size={26} color="#B45309" />
+        <h1 style={styles.loginTitel}>Appen er ikke sat op</h1>
+        <p style={{ ...styles.loginSub, marginBottom: 12 }}>{besked}</p>
+        <p style={styles.dæmpetLille}>
+          Kører du lokalt, mangler værdien i <code>.env</code>. Er det et deploy,
+          skal den stå under <strong>Site configuration → Environment variables</strong> i
+          Netlify — og du skal <strong>bygge igen bagefter</strong>. Vite læser
+          <code> VITE_</code>-variabler når buildet kører, ikke når siden åbnes, så
+          det hjælper ikke at sætte dem på et færdigt deploy.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AppMedSession() {
   const [session, setSession] = useState(null);
   const [klar, setKlar] = useState(false);
   const [nulstil, setNulstil] = useState(false);
@@ -568,6 +595,144 @@ function Nøgletal({ mrk, tal, advarsel, kritisk }) {
    Ny kampagne
    ===================================================================== */
 
+/* ---------------------------------------------------------------------
+   Prompten der bygges til dig.
+
+   Den er ordret den samme som den automatiske generering ville sende, så
+   skifter vi senere til API-nøglen, ændrer resultaterne sig ikke.
+   --------------------------------------------------------------------- */
+function byggPrompt({ brand, navn, brief, maal, antal, kanaler, start, slut }) {
+  const profil = [
+    `Virksomhed: ${brand.name}`,
+    brand.description && `Hvad de laver: ${brand.description}`,
+    brand.target_audience && `Målgruppe: ${brand.target_audience}`,
+    brand.tone_of_voice && `Tone of voice: ${brand.tone_of_voice}`,
+    brand.guardrails && `MÅ IKKE: ${brand.guardrails}`,
+  ].filter(Boolean).join("\n");
+
+  return `Du er content-planlægger for en dansk marketingafdeling.
+
+Du skriver opslag der lyder som om et menneske fra virksomheden har skrevet dem:
+- Ingen "🚀 Spændende nyheder!" eller anden LinkedIn-plastik.
+- Ingen tomme superlativer. Sig noget konkret eller lad være.
+- Variér længde og form hen over serien.
+- Skriv på dansk. Undgå anglicismer hvor der findes et dansk ord.
+
+Tilpas til kanalen: Facebook tåler længere tekst og en historie. Instagram er kortere og båret af billedet. LinkedIn er fagligt og henvender sig til beslutningstagere.
+
+Respekter MÅ IKKE-listen absolut. Den er ikke til forhandling.
+
+Spred opslagene fornuftigt over perioden — ikke alle på samme dag, og på tidspunkter hvor målgruppen faktisk er på.
+
+---
+
+${profil}
+
+---
+
+KAMPAGNE: ${navn}
+Brief: ${brief}
+${maal ? `Mål: ${maal}` : ""}
+Periode: ${start}${slut ? ` til ${slut}` : ""}
+Kanaler til rådighed: ${kanaler.join(", ")}
+
+Lav ${antal} opslag.
+
+Svar KUN med JSON i en \`\`\`json-blok, i præcis dette format:
+
+\`\`\`json
+{
+  "opslag": [
+    {
+      "tekst": "Selve opslagsteksten. Uden hashtags.",
+      "hashtags": ["uden", "havelåge"],
+      "billedbrief": "Hvad billedet skal vise. Konkret nok til at en fotograf kan arbejde ud fra det.",
+      "dag": 0,
+      "klokke": "08:15",
+      "kanaler": ["facebook"]
+    }
+  ]
+}
+\`\`\`
+
+"dag" er antal dage efter startdatoen — 0 er startdagen. "klokke" er HH:MM i dansk tid.`;
+}
+
+/* ---------------------------------------------------------------------
+   Læser Claudes svar.
+
+   Vi tager imod både en ```json-blok og rå JSON, og både {"opslag":[…]}
+   og en bar liste — for det er de tre former man reelt får indsat, og et
+   afvist indsæt er mere irriterende end et par ekstra linjer her.
+   --------------------------------------------------------------------- */
+const KLOKKE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function laesOpslag(raa, tilladteKanaler) {
+  const tekst = (raa ?? "").trim();
+  if (!tekst) throw new Error("Indsæt Claudes svar først.");
+
+  const blok = tekst.match(/```(?:json)?\s*([\s\S]*?)```/);
+  let kandidat = blok ? blok[1].trim() : tekst;
+
+  // Ingen kodeblok: klip fra første { eller [ til den sidste matchende.
+  if (!blok) {
+    const start = kandidat.search(/[[{]/);
+    const slut = Math.max(kandidat.lastIndexOf("}"), kandidat.lastIndexOf("]"));
+    if (start === -1 || slut === -1) {
+      throw new Error("Kunne ikke finde JSON i det du indsatte. Kopierede du hele svaret med?");
+    }
+    kandidat = kandidat.slice(start, slut + 1);
+  }
+
+  let data;
+  try {
+    data = JSON.parse(kandidat);
+  } catch (e) {
+    throw new Error(`JSON'en kunne ikke læses: ${e.message}`);
+  }
+
+  const liste = Array.isArray(data) ? data : data.opslag;
+  if (!Array.isArray(liste) || !liste.length) {
+    throw new Error('Fandt ingen opslag. Forventede {"opslag": [ … ]}.');
+  }
+
+  return liste.map((o, i) => {
+    const nr = i + 1;
+    const tekstFelt = o.tekst ?? o.body;
+    if (typeof tekstFelt !== "string" || !tekstFelt.trim()) {
+      throw new Error(`Opslag ${nr} mangler tekst.`);
+    }
+    if (!KLOKKE.test(o.klokke ?? "")) {
+      throw new Error(`Opslag ${nr} har ugyldigt klokkeslæt: "${o.klokke ?? ""}". Forventede HH:MM.`);
+    }
+
+    const kanaler = (Array.isArray(o.kanaler) ? o.kanaler : []).filter((k) =>
+      tilladteKanaler.includes(k),
+    );
+    if (!kanaler.length) {
+      throw new Error(`Opslag ${nr} har ingen kanaler der er sat op for kunden.`);
+    }
+
+    return {
+      tekst: tekstFelt.trim(),
+      hashtags: (Array.isArray(o.hashtags) ? o.hashtags : [])
+        .map((t) => String(t).replace(/^#/, "").trim()).filter(Boolean),
+      billedbrief: typeof o.billedbrief === "string" ? o.billedbrief : "",
+      dag: Number.isInteger(o.dag) && o.dag >= 0 ? o.dag : 0,
+      klokke: o.klokke,
+      kanaler,
+    };
+  });
+}
+
+function tidspunkt(start, dag, klokke) {
+  const [t, m] = klokke.split(":").map(Number);
+  const d = new Date(`${start}T00:00:00`);
+  d.setDate(d.getDate() + dag);
+  d.setHours(t, m, 0, 0);
+  return d.toISOString();
+}
+
 function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
   const [brandId, setBrandId] = useState(brands[0]?.id ?? "");
   const [navn, setNavn] = useState("");
@@ -577,6 +742,9 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
   const [slut, setSlut] = useState("");
   const [antal, setAntal] = useState(5);
   const [valgte, setValgte] = useState(["facebook", "instagram"]);
+  const [prompt, setPrompt] = useState("");
+  const [svar, setSvar] = useState("");
+  const [kopieret, setKopieret] = useState(false);
   const [venter, setVenter] = useState(false);
   const [fejl, setFejl] = useState("");
 
@@ -588,21 +756,79 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
     setValgte((v) => (v.includes(p) ? v.filter((x) => x !== p) : [...v, p]));
   }
 
-  async function generer() {
+  function byg() {
     setFejl("");
     if (!navn.trim() || !brief.trim()) { setFejl("Udfyld navn og brief."); return; }
     if (!valgte.length) { setFejl("Vælg mindst én kanal."); return; }
 
+    setPrompt(byggPrompt({
+      brand, navn: navn.trim(), brief: brief.trim(), maal: maal.trim(),
+      antal, kanaler: valgte, start, slut,
+    }));
+    setKopieret(false);
+  }
+
+  async function kopier() {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setKopieret(true);
+      setTimeout(() => setKopieret(false), 3000);
+    } catch {
+      setFejl("Kunne ikke kopiere automatisk. Markér teksten og tryk Cmd+C.");
+    }
+  }
+
+  async function opret() {
+    setFejl("");
+
+    let opslag;
+    try {
+      opslag = laesOpslag(svar, valgte);
+    } catch (e) {
+      setFejl(e.message);
+      return;
+    }
+
     setVenter(true);
-    const svar = await kaldApi("generer-kampagne", {
-      brandId, navn, brief, maal, start, slut, antal, kanaler: valgte,
-    });
+
+    const { data: kampagne, error: kampagneFejl } = await supabase
+      .from("campaigns")
+      .insert({
+        brand_id: brandId, name: navn.trim(), brief: brief.trim(),
+        goal: maal.trim() || null, starts_on: start, ends_on: slut || null, status: "draft",
+      })
+      .select().single();
+
+    if (kampagneFejl || !kampagne) {
+      setVenter(false);
+      setFejl(kampagneFejl?.message ?? "Kunne ikke oprette kampagnen.");
+      return;
+    }
+
+    let oprettede = 0;
+    for (const o of opslag) {
+      const { data: raekke } = await supabase
+        .from("posts")
+        .insert({
+          campaign_id: kampagne.id, brand_id: brandId, body: o.tekst,
+          hashtags: o.hashtags, image_brief: o.billedbrief,
+          scheduled_at: tidspunkt(start, o.dag, o.klokke), status: "needs_approval",
+        })
+        .select().single();
+
+      if (!raekke) continue;
+      oprettede++;
+
+      const maalRaekker = kundensKanaler
+        .filter((k) => k.active && o.kanaler.includes(k.platform))
+        .map((k) => ({ post_id: raekke.id, channel_id: k.id }));
+
+      if (maalRaekker.length) await supabase.from("post_targets").insert(maalRaekker);
+    }
+
     setVenter(false);
-
-    if (!svar.ok) { setFejl(svar.fejl); return; }
-
-    visToast(`${svar.antal} opslag oprettet som kladder.`);
-    efterOprettelse(svar.kampagneId);
+    visToast(`${oprettede} opslag oprettet som kladder.`);
+    efterOprettelse(kampagne.id);
   }
 
   if (!brands.length) {
@@ -612,81 +838,121 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
   return (
     <>
       <h1 style={styles.h1}>Ny kampagne</h1>
-      <div style={styles.toKolonner}>
+      <p style={styles.dæmpet}>
+        Byg briefen her, kør den gennem Claude, og indsæt svaret tilbage.
+      </p>
+
+      <div style={{ ...styles.toKolonner, marginTop: 16 }}>
         <div style={styles.kort}>
-          <Felt mrk="Kunde">
-            <select style={styles.input} value={brandId} onChange={(e) => setBrandId(e.target.value)}>
-              {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
-          </Felt>
+          <h2 style={styles.h2}>1 · Briefen</h2>
+          <p style={styles.dæmpetLille}>Tone og forbud kommer fra brandprofilen — du skriver kun sagen.</p>
 
-          <Felt mrk="Kampagnenavn">
-            <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)}
-              placeholder="fx Hovedrengøring efterår" />
-          </Felt>
-
-          <Felt mrk="Brief" hjaelp="Skriv det som du ville sige det til en kollega. Tone og forbud kommer fra brandprofilen.">
-            <textarea style={{ ...styles.input, minHeight: 110, fontFamily: "inherit" }}
-              value={brief} onChange={(e) => setBrief(e.target.value)} />
-          </Felt>
-
-          <Felt mrk="Mål (valgfrit)">
-            <input style={styles.input} value={maal} onChange={(e) => setMaal(e.target.value)}
-              placeholder="fx 5 forespørgsler på gennemgang" />
-          </Felt>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Felt mrk="Start" bredde={150}>
-              <input type="date" style={styles.input} value={start} onChange={(e) => setStart(e.target.value)} />
+          <div style={{ marginTop: 14 }}>
+            <Felt mrk="Kunde">
+              <select style={styles.input} value={brandId}
+                onChange={(e) => { setBrandId(e.target.value); setPrompt(""); }}>
+                {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
             </Felt>
-            <Felt mrk="Slut" bredde={150}>
-              <input type="date" style={styles.input} value={slut} onChange={(e) => setSlut(e.target.value)} />
+
+            <Felt mrk="Kampagnenavn">
+              <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)}
+                placeholder="fx Hovedrengøring efterår" />
             </Felt>
-            <Felt mrk="Antal opslag" bredde={120}>
-              <input type="number" min={1} max={20} style={styles.input}
-                value={antal} onChange={(e) => setAntal(Number(e.target.value))} />
+
+            <Felt mrk="Brief">
+              <textarea style={{ ...styles.input, minHeight: 110, fontFamily: "inherit" }}
+                value={brief} onChange={(e) => setBrief(e.target.value)}
+                placeholder="Skriv det som du ville sige det til en kollega." />
+            </Felt>
+
+            <Felt mrk="Mål (valgfrit)">
+              <input style={styles.input} value={maal} onChange={(e) => setMaal(e.target.value)}
+                placeholder="fx 5 forespørgsler på gennemgang" />
+            </Felt>
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <Felt mrk="Start" bredde={150}>
+                <input type="date" style={styles.input} value={start} onChange={(e) => setStart(e.target.value)} />
+              </Felt>
+              <Felt mrk="Slut" bredde={150}>
+                <input type="date" style={styles.input} value={slut} onChange={(e) => setSlut(e.target.value)} />
+              </Felt>
+              <Felt mrk="Antal opslag" bredde={120}>
+                <input type="number" min={1} max={20} style={styles.input}
+                  value={antal} onChange={(e) => setAntal(Number(e.target.value))} />
+              </Felt>
+            </div>
+
+            <Felt mrk="Kanaler">
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13.5 }}>
+                {["facebook", "instagram", "linkedin"].map((p) => {
+                  const findes = tilgaengelige.includes(p);
+                  return (
+                    <label key={p} style={{ display: "flex", alignItems: "center", gap: 6, opacity: findes ? 1 : 0.45 }}>
+                      <input type="checkbox" checked={valgte.includes(p)} disabled={!findes}
+                        onChange={() => skift(p)} />
+                      {PLATFORM[p]}
+                      {!findes && <span style={styles.dæmpetLille}>(ikke sat op)</span>}
+                    </label>
+                  );
+                })}
+              </div>
             </Felt>
           </div>
 
-          <Felt mrk="Kanaler">
-            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13.5 }}>
-              {["facebook", "instagram", "linkedin"].map((p) => {
-                const findes = tilgaengelige.includes(p);
-                return (
-                  <label key={p} style={{ display: "flex", alignItems: "center", gap: 6, opacity: findes ? 1 : 0.45 }}>
-                    <input type="checkbox" checked={valgte.includes(p)} disabled={!findes}
-                      onChange={() => skift(p)} />
-                    {PLATFORM[p]}
-                    {!findes && <span style={styles.dæmpetLille}>(ikke sat op)</span>}
-                  </label>
-                );
-              })}
-            </div>
-          </Felt>
-
-          {fejl && <p style={styles.fejlBoks}>{fejl}</p>}
-
-          <button style={styles.primaryBtn} disabled={venter} onClick={generer}>
-            {venter ? <><Loader2 size={15} /> Claude skriver…</> : <><Sparkles size={15} /> Generér kampagne</>}
+          <button style={styles.primaryBtn} onClick={byg}>
+            <Sparkles size={15} /> Byg prompt
           </button>
-          <p style={styles.dæmpetLille}>
-            Opslagene oprettes som kladder der afventer godkendelse. Der publiceres intet.
-          </p>
-        </div>
 
-        <div style={styles.kort}>
-          <h2 style={styles.h2}>Det Claude får med</h2>
-          <p style={styles.dæmpetLille}>Kommer fra brandprofilen. Du skriver kun briefen.</p>
-          {brand ? (
+          {brand && (
             <dl style={styles.definitioner}>
-              <dt style={styles.dt}>Målgruppe</dt><dd style={styles.dd}>{brand.target_audience || "—"}</dd>
               <dt style={styles.dt}>Tone</dt><dd style={styles.dd}>{brand.tone_of_voice || "—"}</dd>
               <dt style={styles.dt}>Må ikke</dt>
               <dd style={{ ...styles.dd, borderLeft: "2px solid #B91C1C", paddingLeft: 10 }}>
                 {brand.guardrails || "Ikke udfyldt — så har Claude ingen grænser at holde sig indenfor."}
               </dd>
             </dl>
-          ) : <p style={styles.dæmpet}>Vælg en kunde.</p>}
+          )}
+        </div>
+
+        <div style={styles.kort}>
+          <h2 style={styles.h2}>2 · Kør den gennem Claude</h2>
+
+          {!prompt ? (
+            <p style={styles.dæmpet}>Udfyld briefen og tryk <strong>Byg prompt</strong>.</p>
+          ) : (
+            <>
+              <p style={styles.dæmpetLille}>
+                Kopiér, indsæt i Claude, og sæt hele svaret ind nedenunder. Prompten beder om
+                JSON — indsæt gerne svaret som det er, kodeblok og det hele.
+              </p>
+
+              <textarea readOnly value={prompt}
+                style={{ ...styles.input, minHeight: 150, marginTop: 10, fontSize: 12,
+                  fontFamily: "ui-monospace, Menlo, monospace" }} />
+
+              <button style={{ ...styles.secondaryBtn, marginTop: 8 }} onClick={kopier}>
+                {kopieret ? <><Check size={15} /> Kopieret</> : "Kopiér prompt"}
+              </button>
+
+              <h2 style={{ ...styles.h2, marginTop: 22 }}>3 · Indsæt svaret</h2>
+              <textarea value={svar} onChange={(e) => setSvar(e.target.value)}
+                placeholder={'{\n  "opslag": [ … ]\n}'}
+                style={{ ...styles.input, minHeight: 150, marginTop: 8, fontSize: 12,
+                  fontFamily: "ui-monospace, Menlo, monospace" }} />
+
+              <button style={{ ...styles.primaryBtn, marginTop: 10 }}
+                disabled={venter || !svar.trim()} onClick={opret}>
+                {venter ? <><Loader2 size={15} /> Opretter…</> : "Opret opslag"}
+              </button>
+              <p style={styles.dæmpetLille}>
+                Opslagene bliver kladder der afventer godkendelse. Der publiceres intet.
+              </p>
+            </>
+          )}
+
+          {fejl && <p style={styles.fejlBoks}>{fejl}</p>}
         </div>
       </div>
     </>

@@ -8,10 +8,18 @@ import { createClient } from '@supabase/supabase-js'
  */
 export function adminKlient() {
   const url = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  // sb_secret_… er afløseren for service_role. Den nye foretrækkes; den gamle
+  // virker indtil Supabase lukker den ved udgangen af 2026. Begge bypasser RLS.
+  const key = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY
+
   if (!url || !key) {
-    throw new Error('SUPABASE_URL og SUPABASE_SERVICE_ROLE_KEY skal være sat.')
+    throw new Error(
+      'SUPABASE_URL og SUPABASE_SECRET_KEY skal være sat ' +
+        '(SUPABASE_SERVICE_ROLE_KEY virker også indtil den udfases).',
+    )
   }
+
   return createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   })

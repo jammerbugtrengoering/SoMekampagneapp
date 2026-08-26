@@ -15,7 +15,10 @@ Planning-App og Medarbejder-App.
 Brandprofil (tone, målgruppe, må-ikke)
         │
         ▼
-Kampagnebrief ──► Claude ──► opslag med tekst, hashtags, billedbrief, tidspunkt
+Kampagnebrief ──► appen bygger en prompt ──► du kører den i Claude
+        │                                    og indsætter JSON'en tilbage
+        ▼
+opslag med tekst, hashtags, billedbrief, tidspunkt
         │
         ▼
 Du redigerer og godkender     (intet går ud uden dette skridt)
@@ -29,7 +32,7 @@ hemmelighed går gennem en Netlify-funktion:
 
 | Funktion | Gør | Hvorfor på serveren |
 |---|---|---|
-| `generer-kampagne` | Kalder Claude, opretter kladder | `ANTHROPIC_API_KEY` må ikke i klient-JS |
+| `generer-kampagne` | Kalder Claude automatisk | **Ikke i brug.** Kræver `ANTHROPIC_API_KEY`. Se nedenfor |
 | `gem-kanal` | Krypterer og gemmer Meta-tokens, tester forbindelsen | Krypteringsnøglen findes kun på serveren |
 | `publicer-opslag` | "Publicér nu" | Tokens dekrypteres her; browseren ser dem aldrig |
 | `planlagt-publicering` | Cron hvert 15. min | Ingen brugersession bag et cron-kald |
@@ -76,6 +79,24 @@ npm run dev
 
 Access tokenet hører i din shell, ikke i `.env`. Det giver adgang til alle dine
 Supabase-projekter, mens appen kun har brug for anon-nøglen.
+
+### Nøgler
+
+Supabase udfaser `anon` og `service_role` ved udgangen af 2026. Denne app
+bruger afløserne:
+
+| Ny | Afløser | Hører |
+|---|---|---|
+| `sb_publishable_…` → `VITE_SUPABASE_PUBLISHABLE_KEY` | `anon` | I browseren. Offentlig — RLS er grænsen, ikke nøglen |
+| `sb_secret_…` → `SUPABASE_SECRET_KEY` | `service_role` | Kun i Netlify-funktionerne. Bypasser RLS |
+
+Hentes under **Settings → API Keys**. De gamle navne læses stadig som
+fallback, så Planning-App og Medarbejder-App kan migrere i deres eget tempo.
+
+En detalje der bider: de nye nøgler må **ikke** stå alene i en
+`Authorization: Bearer`-header — kun hvis `apikey` har samme værdi.
+`createClient` klarer det selv, men skriver du et `fetch` mod Supabase i
+hånden, skal du sætte begge headere. Se storage-kaldet i `scripts/setup-db.mjs`.
 
 ### Miljøvariabler
 
@@ -165,6 +186,19 @@ npm run build
 koden alligevel prøver at ringe til Meta.
 
 ---
+
+## Automatisk generering
+
+I dag bygger appen en prompt, du kører den i Claude, og indsætter svaret
+tilbage. Det koster ingenting og kræver ingen API-nøgle.
+
+Vil du have den automatisk, findes funktionen allerede i
+`netlify/functions/generer-kampagne.js`. Sæt `ANTHROPIC_API_KEY` i Netlify og
+kald `kaldApi("generer-kampagne", …)` fra `NyKampagne` i stedet for
+indsæt-feltet. Prompten i `byggPrompt()` er ordret den samme som funktionen
+sender, så resultaterne skifter ikke karakter når du gør det.
+
+Koster cirka 0,20 kr per kampagne med fem opslag.
 
 ## Hvad der ikke er med endnu
 

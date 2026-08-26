@@ -11,11 +11,20 @@ import { adminKlient, jsonSvar, tørkørsel } from './_lib/supabase.js'
  * service-role. Kaldes den manuelt over HTTP, kræves CRON_SECRET.
  */
 export default async function handler(req) {
-  // Netlifys egen scheduler kalder uden header. Alle andre skal vise nøglen.
+  // Netlifys egen scheduler sætter x-nf-event: schedule. Den slipper altid ind.
+  //
+  // CRON_SECRET er valgfri og åbner for at kalde funktionen manuelt over HTTP —
+  // brugbart til at teste uden at vente på næste kvarter. Er den ikke sat,
+  // afvises alt andet end scheduleren, hvilket er den sikre standard.
   const fraScheduler = req.headers.get('x-nf-event') === 'schedule'
   if (!fraScheduler) {
     const hemmelighed = process.env.CRON_SECRET
-    if (!hemmelighed) return jsonSvar({ fejl: 'CRON_SECRET er ikke sat.' }, 500)
+    if (!hemmelighed) {
+      return jsonSvar(
+        { fejl: 'Kun den planlagte kørsel må kalde denne. Sæt CRON_SECRET for at kalde manuelt.' },
+        403,
+      )
+    }
     if (req.headers.get('x-cron-secret') !== hemmelighed) {
       return jsonSvar({ fejl: 'Uautoriseret.' }, 401)
     }
