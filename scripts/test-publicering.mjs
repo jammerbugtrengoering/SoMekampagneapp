@@ -127,5 +127,63 @@ await test('kanal uden token afvises før netværkskald', async () => {
   assert.match(r.fejl ?? '', /token/i)
 })
 
+console.log('\nTørkørsel rører ikke databasen')
+
+/**
+ * Stub-klient der optager hvert skrivekald. Under tørkørsel skal listen
+ * være tom — ellers ville kalenderen vise "Publiceret" for noget der aldrig
+ * blev sendt, og opslaget ville blive sprunget over den dag vi går live.
+ */
+function stubKlient(skrivninger) {
+  const opslag = {
+    id: 'p1', body: 'Tekst', hashtags: [], image_url: 'https://eksempel.dk/a.jpg',
+  }
+  const maal = [{
+    id: 't1', attempts: 0,
+    channels: { ...kanal, id: 'ch-1', token_ciphertext: krypter('t') },
+  }]
+
+  const byg = (tabel) => ({
+    select: () => ({
+      eq: () => ({
+        single: async () => ({ data: tabel === 'posts' ? opslag : null, error: null }),
+        in: async () => ({ data: tabel === 'post_targets' ? maal : [], error: null }),
+      }),
+    }),
+    update: (v) => ({ eq: async () => { skrivninger.push({ tabel, v }); return { error: null } } }),
+  })
+
+  return { from: byg }
+}
+
+const { publicerOpslag } = await import('../netlify/functions/_lib/meta.js')
+
+await test('tørkørsel skriver ingen status til databasen', async () => {
+  process.env.PUBLISH_DRY_RUN = 'true'
+  const skrivninger = []
+  const res = await publicerOpslag(stubKlient(skrivninger), 'p1')
+
+  assert.equal(res.length, 1, 'skulle stadig give et resultat')
+  assert.equal(res[0].tørkørsel, true)
+  assert.deepEqual(skrivninger, [], `forventede ingen skrivninger, fik ${JSON.stringify(skrivninger)}`)
+})
+
+await test('uden tørkørsel skrives status som normalt', async () => {
+  process.env.PUBLISH_DRY_RUN = 'false'
+  const skrivninger = []
+  // Netværket blokeres, så kaldet fejler — men statusskrivningerne skal ske.
+  const oprindelig = globalThis.fetch
+  globalThis.fetch = () => { throw new Error('ingen netvaerk i test') }
+  try {
+    await publicerOpslag(stubKlient(skrivninger), 'p1')
+  } finally {
+    globalThis.fetch = oprindelig
+    process.env.PUBLISH_DRY_RUN = 'true'
+  }
+  const tabeller = skrivninger.map((s) => s.tabel)
+  assert.ok(tabeller.includes('posts'), 'posts skulle opdateres')
+  assert.ok(tabeller.includes('post_targets'), 'post_targets skulle opdateres')
+})
+
 console.log(fejlede === 0 ? '\nAlle tests bestået.\n' : `\n${fejlede} test(s) fejlede.\n`)
 process.exit(fejlede === 0 ? 0 : 1)

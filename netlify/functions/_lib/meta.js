@@ -263,7 +263,15 @@ export async function publicerOpslag(klient, opslagId) {
 
   if (!maal?.length) return []
 
-  await klient.from('posts').update({ status: 'publishing' }).eq('id', opslagId)
+  // Tørkørsel må ikke efterlade spor. Markerede vi opslaget som publiceret,
+  // ville kalenderen lyve OG opslaget blive sprunget over den dag du går live,
+  // fordi det allerede stod som færdigt. En tørkørsel skal kunne gentages i det
+  // uendelige og lade databasen stå præcis som før.
+  const tørt = tørkørsel()
+
+  if (!tørt) {
+    await klient.from('posts').update({ status: 'publishing' }).eq('id', opslagId)
+  }
 
   const tekst = tekstMedTags(opslag)
   const resultater = []
@@ -272,16 +280,20 @@ export async function publicerOpslag(klient, opslagId) {
     const kanal = m.channels
     if (!kanal) continue
 
-    await klient
-      .from('post_targets')
-      .update({ status: 'publishing', attempts: (m.attempts ?? 0) + 1 })
-      .eq('id', m.id)
+    if (!tørt) {
+      await klient
+        .from('post_targets')
+        .update({ status: 'publishing', attempts: (m.attempts ?? 0) + 1 })
+        .eq('id', m.id)
+    }
 
     const res = await publicerTilKanal(kanal, {
       tekst,
       billedUrl: opslag.image_url ?? undefined,
     })
     resultater.push({ ...res, kanalNavn: kanal.display_name })
+
+    if (tørt) continue
 
     await klient
       .from('post_targets')
@@ -294,6 +306,8 @@ export async function publicerOpslag(klient, opslagId) {
       })
       .eq('id', m.id)
   }
+
+  if (tørt) return resultater
 
   const alleOk = resultater.every((r) => r.ok)
   await klient

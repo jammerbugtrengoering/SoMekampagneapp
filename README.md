@@ -175,6 +175,48 @@ Den planlagte funktion kører hvert 15. minut og publicerer alt der er
 
 ---
 
+## Før du går live
+
+Fire spærringer holder opslag inde. Tre af dem gælder lige nu:
+
+1. **Ingen tokens.** En kanal uden token afvises før noget netværkskald.
+2. **Tørkørsel er standard.** `PUBLISH_DRY_RUN` skal stå til den præcise
+   streng `"false"`. Er den tom, forkert stavet eller slet ikke sat, er
+   tørkørsel slået til. Der findes ingen vej hvor en manglende variabel
+   betyder "publicér".
+3. **Tørkørslen returnerer før netværket.** Gaten er første linje i
+   `publicerTilKanal()`. `npm run test:publicering` kaprer `fetch` og fejler
+   hvis koden alligevel prøver at ringe ud.
+4. **Kun godkendte opslag.** Cron'en henter `status = 'approved'`. Kladder og
+   opslag der afventer godkendelse røres ikke.
+
+**Tørkørsel efterlader ingen spor i databasen.** Ingen status skrives, intet
+markeres som publiceret. Det er der en test på — uden den ville kalenderen vise
+"Publiceret" for noget der aldrig blev sendt, og opslaget ville blive sprunget
+over den dag du går live.
+
+### Sådan går du live, kontrolleret
+
+```bash
+npm run test:publicering    # skal være grøn
+```
+
+1. Sæt tokens på kanalerne og tryk **Test forbindelse** på hver. Den læser kun
+   — den publicerer ikke.
+2. Lav ét testopslag på en side ingen følger, godkend det, og tryk
+   **Publicér nu** mens tørkørsel stadig er slået til. Se linjen i
+   funktionsloggen i Netlify.
+3. Sæt `PUBLISH_DRY_RUN=false` i Netlify og **deploy igen** — variablen læses
+   når funktionen starter.
+4. Publicér samme testopslag rigtigt. Tjek at det er på siden.
+5. Først derefter godkender du rigtige opslag.
+
+Fortryder du, er vejen tilbage at sætte `PUBLISH_DRY_RUN=true` og deploye.
+Allerede publicerede opslag bliver ikke trukket tilbage — det skal gøres på
+Facebook eller Instagram.
+
+---
+
 ## Test
 
 ```bash
@@ -188,18 +230,29 @@ koden alligevel prøver at ringe til Meta.
 
 ---
 
-## Automatisk generering
+## Generering — tre veje til de samme opslag
 
-I dag bygger appen en prompt, du kører den i Claude, og indsætter svaret
-tilbage. Det koster ingenting og kræver ingen API-nøgle.
+Alle tre bruger `src/prompt.js`, så resultaterne skifter ikke karakter når du
+skifter vej.
 
-Vil du have den automatisk, findes funktionen allerede i
-`netlify/functions/generer-kampagne.js`. Sæt `ANTHROPIC_API_KEY` i Netlify og
-kald `kaldApi("generer-kampagne", …)` fra `NyKampagne` i stedet for
-indsæt-feltet. Prompten i `byggPrompt()` er ordret den samme som funktionen
-sender, så resultaterne skifter ikke karakter når du gør det.
+**1. Copy/paste i appen.** Byg prompten under Ny kampagne, kør den i Claude,
+indsæt JSON'en tilbage. Ingen opsætning, ingen udgift.
 
-Koster cirka 0,20 kr per kampagne med fem opslag.
+**2. `npm run kampagne` — dit eget abonnement.** Kører `claude -p` lokalt.
+Claude Code bruger dit almindelige abonnements-login, så der er ingen API-nøgle
+og ingen regning per kampagne. Scriptet spørger om kunde, brief og periode,
+viser opslagene, og gemmer dem som kladder når du siger ja.
+
+Kræver Claude Code installeret og logget ind, samt `SUPABASE_SECRET_KEY` i
+`.env`. To ting værd at vide: scriptet bruger **ikke** `--bare`, fordi bare mode
+hverken læser OAuth-credentials eller nøgleringen og derfor ville kræve
+`ANTHROPIC_API_KEY`. Og det kan kun køre lokalt — den deployede app kan ikke
+låne dit abonnement, for en server har ingen adgang til dit login.
+
+**3. `netlify/functions/generer-kampagne.js` — API-nøgle.** Ligger klar. Sæt
+`ANTHROPIC_API_KEY` i Netlify og kald `kaldApi("generer-kampagne", …)` fra
+`NyKampagne` i stedet for indsæt-feltet. Cirka 0,20 kr per kampagne med fem
+opslag. Det er den vej der skal bruges når appen skal køre uden dig.
 
 ## Billeder
 
