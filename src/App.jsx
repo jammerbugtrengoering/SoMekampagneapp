@@ -2,13 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle, Calendar, Check, ChevronLeft, ChevronRight, Eye,
   Image as ImageIcon, Loader2, LogOut, Plus, RefreshCw, Send, Sparkles,
-  Trash2, Users, X,
+  Pencil, Trash2, Users, X,
 } from "lucide-react";
 import { supabase, kaldApi, opsaetningsfejl } from "./supabaseClient";
 import {
   FORMATER, base64TilBlob, foersteLinje, tegnSkabelon, uploadBillede,
 } from "./billeder";
-import { byggPrompt, laesOpslag, tidspunkt } from "./prompt";
+import {
+  byggOmskrivPrompt, byggPrompt, flytDage, laesOmskrivning, laesOpslag, tidspunkt,
+} from "./prompt";
 import { REGLER, fuldTekst, klip, tjekOpslag } from "./kanalregler";
 
 /* =====================================================================
@@ -443,7 +445,7 @@ function Kampagneapp({ session, onLogUd }) {
           />
         ) : side === "kampagner" ? (
           <Kampagner
-            kampagner={kampagner} opslag={opslag} brandFor={brandFor}
+            kampagner={kampagner} opslag={opslag} brandFor={brandFor} kanalerFor={kanalerFor}
             valgt={valgtKampagne} setValgt={setValgtKampagne}
             visToast={visToast} genindlaes={hentAlt}
           />
@@ -841,8 +843,11 @@ function Felt({ mrk, hjaelp, bredde, children }) {
    Kampagner og opslag
    ===================================================================== */
 
-function Kampagner({ kampagner, opslag, brandFor, valgt, setValgt, visToast, genindlaes }) {
+function Kampagner({
+  kampagner, opslag, brandFor, kanalerFor, valgt, setValgt, visToast, genindlaes,
+}) {
   const [visIndex, setVisIndex] = useState(null);
+  const [retter, setRetter] = useState(false);
   const aktuel = kampagner.find((k) => k.id === valgt) ?? kampagner[0];
 
   if (!kampagner.length) {
@@ -867,6 +872,11 @@ function Kampagner({ kampagner, opslag, brandFor, valgt, setValgt, visToast, gen
         {liste.length > 0 && (
           <button style={styles.secondaryBtn} onClick={() => setVisIndex(0)}>
             <Eye size={15} /> Forhåndsvis serien
+          </button>
+        )}
+        {aktuel && (
+          <button style={styles.secondaryBtn} onClick={() => setRetter(true)}>
+            <Pencil size={15} /> Ret kampagnen
           </button>
         )}
       </div>
@@ -904,6 +914,14 @@ function Kampagner({ kampagner, opslag, brandFor, valgt, setValgt, visToast, gen
       {visIndex !== null && (
         <Forhaandsvisning liste={liste} startIndex={visIndex} brandFor={brandFor}
           onLuk={() => setVisIndex(null)} />
+      )}
+
+      {retter && aktuel && (
+        <RetKampagne
+          kampagne={aktuel} liste={liste} brand={brand}
+          kanaler={kanalerFor(aktuel.brand_id)}
+          visToast={visToast} genindlaes={genindlaes} onLuk={() => setRetter(false)}
+        />
       )}
     </>
   );
@@ -1093,6 +1111,427 @@ function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
         />
       )}
     </article>
+  );
+}
+
+/* =====================================================================
+   Ret hele kampagnen
+
+   Fire ting man reelt vil: rette felterne, flytte serien i tid, skrive
+   teksterne om efter en instruks, eller starte forfra på en ny brief.
+
+   Én regel gælder alle fire: publicerede opslag røres aldrig. De er ude i
+   verden, og databasen skal fortælle sandheden om hvad der blev sendt.
+   Godkendte opslag spørges der om hver gang — de er dem du har sagt god
+   for, og de skal ikke ændre sig bag din ryg.
+   ===================================================================== */
+
+function inddelOpslag(liste) {
+  return {
+    publicerede: liste.filter((o) => o.status === "published"),
+    godkendte: liste.filter((o) => o.status === "approved"),
+    frie: liste.filter((o) => !["published", "approved"].includes(o.status)),
+  };
+}
+
+function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, onLuk }) {
+  const [tilstand, setTilstand] = useState("felter");
+  const [medGodkendte, setMedGodkendte] = useState(false);
+  const [venter, setVenter] = useState(false);
+  const [fejl, setFejl] = useState("");
+
+  const { publicerede, godkendte, frie } = useMemo(() => inddelOpslag(liste), [liste]);
+  const beroerte = medGodkendte ? [...frie, ...godkendte] : frie;
+
+  // Felter
+  const [navn, setNavn] = useState(kampagne.name ?? "");
+  const [brief, setBrief] = useState(kampagne.brief ?? "");
+  const [maal, setMaal] = useState(kampagne.goal ?? "");
+  const [start, setStart] = useState(kampagne.starts_on ?? "");
+  const [slut, setSlut] = useState(kampagne.ends_on ?? "");
+
+  // Tid
+  const [dage, setDage] = useState(7);
+
+  // Omskrivning og ny brief
+  const [instruks, setInstruks] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [svar, setSvar] = useState("");
+  const [kopieret, setKopieret] = useState(false);
+  const [nyBrief, setNyBrief] = useState(kampagne.brief ?? "");
+  const [antal, setAntal] = useState(Math.max(liste.length, 1));
+
+  const platforme = [...new Set(kanaler.filter((k) => k.active).map((k) => k.platform))];
+
+  async function kopier(tekst) {
+    try {
+      await navigator.clipboard.writeText(tekst);
+      setKopieret(true);
+      setTimeout(() => setKopieret(false), 3000);
+    } catch {
+      setFejl("Kunne ikke kopiere automatisk. Markér teksten og tryk Cmd+C.");
+    }
+  }
+
+  const faerdig = async (besked) => {
+    visToast(besked);
+    await genindlaes();
+    onLuk();
+  };
+
+  // ---- Felter ----
+  async function gemFelter() {
+    setFejl(""); setVenter(true);
+    const { error } = await supabase
+      .from("campaigns")
+      .update({
+        name: navn.trim(), brief: brief.trim() || null, goal: maal.trim() || null,
+        starts_on: start || null, ends_on: slut || null,
+      })
+      .eq("id", kampagne.id);
+    setVenter(false);
+    if (error) return setFejl(error.message);
+    faerdig("Kampagnen er rettet. Opslagene er urørte.");
+  }
+
+  // ---- Flyt i tid ----
+  async function flyt() {
+    setFejl("");
+    if (!beroerte.length) return setFejl("Ingen opslag at flytte.");
+    setVenter(true);
+
+    for (const o of beroerte) {
+      if (!o.scheduled_at) continue;
+      const { error } = await supabase
+        .from("posts")
+        .update({ scheduled_at: flytDage(o.scheduled_at, dage) })
+        .eq("id", o.id);
+      if (error) { setVenter(false); return setFejl(error.message); }
+    }
+
+    // Kampagnens egne datoer følger med, ellers passer perioden ikke længere.
+    const skub = (d) => (d ? flytDage(`${d}T12:00:00`, dage).slice(0, 10) : null);
+    await supabase
+      .from("campaigns")
+      .update({ starts_on: skub(kampagne.starts_on), ends_on: skub(kampagne.ends_on) })
+      .eq("id", kampagne.id);
+
+    setVenter(false);
+    faerdig(
+      `${beroerte.length} opslag flyttet ${Math.abs(dage)} dage ${dage < 0 ? "tilbage" : "frem"}.`,
+    );
+  }
+
+  // ---- Skriv om ----
+  function byggOmskriv() {
+    setFejl("");
+    if (!instruks.trim()) return setFejl("Skriv hvad der skal rettes.");
+    if (!beroerte.length) return setFejl("Ingen opslag at skrive om.");
+
+    setPrompt(byggOmskrivPrompt({
+      brand, kampagne, instruks: instruks.trim(),
+      opslag: beroerte.map((o) => ({ ...o, tekst: o.body })),
+    }));
+    setKopieret(false);
+  }
+
+  async function anvendOmskrivning() {
+    setFejl("");
+    let rettelser;
+    try {
+      rettelser = laesOmskrivning(svar, beroerte.length);
+    } catch (e) {
+      return setFejl(e.message);
+    }
+
+    setVenter(true);
+    let rettet = 0;
+
+    for (const r of rettelser) {
+      const maal = beroerte[r.nr - 1];
+      if (!maal) continue;
+
+      const felter = { body: r.tekst, hashtags: r.hashtags };
+      if (r.billedbrief) felter.image_brief = r.billedbrief;
+      // Var opslaget godkendt, trækkes godkendelsen — teksten er en anden nu.
+      if (maal.status === "approved") felter.status = "needs_approval";
+
+      const { error } = await supabase.from("posts").update(felter).eq("id", maal.id);
+      if (error) { setVenter(false); return setFejl(error.message); }
+      rettet++;
+    }
+
+    setVenter(false);
+    faerdig(
+      `${rettet} opslag omskrevet.` +
+        (medGodkendte && godkendte.length
+          ? " Godkendelsen er trukket på dem der var godkendt."
+          : ""),
+    );
+  }
+
+  // ---- Ny brief ----
+  function byggNy() {
+    setFejl("");
+    if (!nyBrief.trim()) return setFejl("Skriv den nye brief.");
+    if (!platforme.length) return setFejl("Kunden har ingen aktive kanaler.");
+
+    setPrompt(byggPrompt({
+      brand, navn: navn.trim(), brief: nyBrief.trim(), maal: maal.trim(),
+      antal, kanaler: platforme, start: start || kampagne.starts_on, slut,
+    }));
+    setKopieret(false);
+  }
+
+  async function anvendNy() {
+    setFejl("");
+    let nye;
+    try {
+      nye = laesOpslag(svar, platforme);
+    } catch (e) {
+      return setFejl(e.message);
+    }
+
+    setVenter(true);
+
+    // De gamle slettes, ikke skjules. post_targets følger med via cascade.
+    for (const o of beroerte) {
+      const { error } = await supabase.from("posts").delete().eq("id", o.id);
+      if (error) { setVenter(false); return setFejl(error.message); }
+    }
+
+    const startDato = start || kampagne.starts_on;
+    let oprettede = 0;
+
+    for (const o of nye) {
+      const { data: raekke } = await supabase
+        .from("posts")
+        .insert({
+          campaign_id: kampagne.id, brand_id: kampagne.brand_id, body: o.tekst,
+          hashtags: o.hashtags, image_brief: o.billedbrief,
+          scheduled_at: tidspunkt(startDato, o.dag, o.klokke), status: "needs_approval",
+        })
+        .select().single();
+
+      if (!raekke) continue;
+      oprettede++;
+
+      const maalRaekker = kanaler
+        .filter((k) => k.active && o.kanaler.includes(k.platform))
+        .map((k) => ({ post_id: raekke.id, channel_id: k.id }));
+      if (maalRaekker.length) await supabase.from("post_targets").insert(maalRaekker);
+    }
+
+    await supabase
+      .from("campaigns")
+      .update({ brief: nyBrief.trim(), name: navn.trim(), goal: maal.trim() || null })
+      .eq("id", kampagne.id);
+
+    setVenter(false);
+    faerdig(`${beroerte.length} gamle opslag erstattet af ${oprettede} nye.`);
+  }
+
+  const TILSTANDE = [
+    ["felter", "Ret felter"],
+    ["tid", "Flyt i tid"],
+    ["omskriv", "Skriv om"],
+    ["ny", "Ny brief"],
+  ];
+
+  const roererOpslag = tilstand !== "felter";
+
+  return (
+    <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
+      <div style={{ ...styles.dialog, maxWidth: 880 }}>
+        <div style={styles.dialogHoved}>
+          <h2 style={{ ...styles.h2, margin: 0 }}>Ret kampagnen</h2>
+          <span style={styles.dæmpetLille}>{kampagne.name}</span>
+          <div style={{ flex: 1 }} />
+          <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
+        </div>
+
+        <div style={styles.faner}>
+          {TILSTANDE.map(([id, mrk]) => (
+            <button key={id} style={tilstand === id ? styles.faneAktiv : styles.fane}
+              onClick={() => { setTilstand(id); setPrompt(""); setSvar(""); setFejl(""); }}>
+              {mrk}
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.dialogKrop}>
+          {roererOpslag && (
+            <div style={styles.omfang}>
+              <div style={styles.dt}>Det her rører</div>
+              <p style={{ margin: "6px 0 0", fontSize: 13.5 }}>
+                <strong>{beroerte.length}</strong> opslag
+                {frie.length > 0 && ` · ${frie.length} kladde/afventer`}
+                {medGodkendte && godkendte.length > 0 && ` · ${godkendte.length} godkendt`}
+              </p>
+
+              {godkendte.length > 0 && (
+                <label style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9, fontSize: 13.5 }}>
+                  <input type="checkbox" checked={medGodkendte}
+                    onChange={(e) => setMedGodkendte(e.target.checked)} />
+                  Ret også de {godkendte.length} godkendte
+                  <span style={styles.dæmpetLille}>(godkendelsen trækkes)</span>
+                </label>
+              )}
+
+              {publicerede.length > 0 && (
+                <p style={{ ...styles.dæmpetLille, marginTop: 8 }}>
+                  {publicerede.length} publiceret opslag røres ikke. De er ude i verden — skal
+                  de væk, skal det ske på Facebook eller Instagram.
+                </p>
+              )}
+            </div>
+          )}
+
+          {fejl && <p style={styles.fejlBoks}>{fejl}</p>}
+
+          {/* ---- Ret felter ---- */}
+          {tilstand === "felter" && (
+            <>
+              <p style={styles.dæmpet}>Opslagene står som de er. Kun kampagnens egne felter rettes.</p>
+              <div style={{ marginTop: 14 }}>
+                <Felt mrk="Navn">
+                  <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)} />
+                </Felt>
+                <Felt mrk="Brief">
+                  <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit" }}
+                    value={brief} onChange={(e) => setBrief(e.target.value)} />
+                </Felt>
+                <Felt mrk="Mål">
+                  <input style={styles.input} value={maal} onChange={(e) => setMaal(e.target.value)} />
+                </Felt>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Felt mrk="Start" bredde={160}>
+                    <input type="date" style={styles.input} value={start ?? ""}
+                      onChange={(e) => setStart(e.target.value)} />
+                  </Felt>
+                  <Felt mrk="Slut" bredde={160}>
+                    <input type="date" style={styles.input} value={slut ?? ""}
+                      onChange={(e) => setSlut(e.target.value)} />
+                  </Felt>
+                </div>
+              </div>
+              <button style={styles.primaryBtn} disabled={venter} onClick={gemFelter}>
+                {venter ? "Gemmer…" : "Gem"}
+              </button>
+            </>
+          )}
+
+          {/* ---- Flyt i tid ---- */}
+          {tilstand === "tid" && (
+            <>
+              <p style={styles.dæmpet}>
+                Alle berørte opslag rykkes lige meget, så den indbyrdes afstand bevares.
+                Klokkeslæt beholdes.
+              </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "14px 0" }}>
+                {[-14, -7, -1, 1, 7, 14].map((d) => (
+                  <button key={d} style={dage === d ? styles.primaryBtn : styles.secondaryBtn}
+                    onClick={() => setDage(d)}>
+                    {d > 0 ? `+${d}` : d} dage
+                  </button>
+                ))}
+              </div>
+              <Felt mrk="Eller et andet antal dage" bredde={200}>
+                <input type="number" style={styles.input} value={dage}
+                  onChange={(e) => setDage(Number(e.target.value))} />
+              </Felt>
+
+              {beroerte.length > 0 && beroerte[0].scheduled_at && (
+                <p style={styles.dæmpetLille}>
+                  Første opslag flytter fra {visTid(beroerte[0].scheduled_at)}
+                  {" til "}{visTid(flytDage(beroerte[0].scheduled_at, dage))}.
+                </p>
+              )}
+
+              <button style={{ ...styles.primaryBtn, marginTop: 12 }} disabled={venter} onClick={flyt}>
+                {venter ? "Flytter…" : `Flyt ${beroerte.length} opslag`}
+              </button>
+            </>
+          )}
+
+          {/* ---- Skriv om / ny brief ---- */}
+          {(tilstand === "omskriv" || tilstand === "ny") && (
+            <div style={styles.toKolonner}>
+              <div>
+                {tilstand === "omskriv" ? (
+                  <>
+                    <p style={styles.dæmpet}>
+                      De nuværende opslag sendes med, så Claude retter dem frem for at
+                      skrive nye. Tidspunkter og kanaler ændres ikke.
+                    </p>
+                    <Felt mrk="Hvad skal rettes"
+                      hjaelp="fx «gør dem kortere og mindre formelle» eller «flyt telefonnummeret op i starten»">
+                      <textarea style={{ ...styles.input, minHeight: 100, fontFamily: "inherit" }}
+                        value={instruks} onChange={(e) => setInstruks(e.target.value)} />
+                    </Felt>
+                    <button style={styles.secondaryBtn} onClick={byggOmskriv}>
+                      <Sparkles size={15} /> Byg prompt
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p style={styles.dæmpet}>
+                      Hele serien skrives forfra. De {beroerte.length} berørte opslag
+                      <strong> slettes</strong> og erstattes.
+                    </p>
+                    <Felt mrk="Ny brief">
+                      <textarea style={{ ...styles.input, minHeight: 100, fontFamily: "inherit" }}
+                        value={nyBrief} onChange={(e) => setNyBrief(e.target.value)} />
+                    </Felt>
+                    <Felt mrk="Antal opslag" bredde={140}>
+                      <input type="number" min={1} max={20} style={styles.input}
+                        value={antal} onChange={(e) => setAntal(Number(e.target.value))} />
+                    </Felt>
+                    <button style={styles.secondaryBtn} onClick={byggNy}>
+                      <Sparkles size={15} /> Byg prompt
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <div>
+                {!prompt ? (
+                  <div style={styles.tomForhaandsvisning}>
+                    <span style={styles.dæmpetLille}>Tryk «Byg prompt»</span>
+                  </div>
+                ) : (
+                  <>
+                    <textarea readOnly value={prompt}
+                      style={{ ...styles.input, minHeight: 130, fontSize: 12,
+                        fontFamily: "ui-monospace, Menlo, monospace" }} />
+                    <button style={{ ...styles.secondaryBtn, marginTop: 8 }}
+                      onClick={() => kopier(prompt)}>
+                      {kopieret ? <><Check size={15} /> Kopieret</> : "Kopiér prompt"}
+                    </button>
+
+                    <div style={{ marginTop: 16 }}>
+                      <label style={styles.label}>Indsæt svaret</label>
+                      <textarea value={svar} onChange={(e) => setSvar(e.target.value)}
+                        placeholder={'{\n  "opslag": [ … ]\n}'}
+                        style={{ ...styles.input, minHeight: 130, fontSize: 12,
+                          fontFamily: "ui-monospace, Menlo, monospace" }} />
+                    </div>
+
+                    <button style={{ ...styles.primaryBtn, marginTop: 10 }}
+                      disabled={venter || !svar.trim()}
+                      onClick={tilstand === "omskriv" ? anvendOmskrivning : anvendNy}>
+                      {venter ? <><Loader2 size={15} /> Retter…</>
+                        : tilstand === "omskriv" ? "Anvend rettelserne"
+                        : `Erstat ${beroerte.length} opslag`}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1976,6 +2415,11 @@ const styles = {
 
   advarselBoks: { background: "#FDF3E0", color: "#92400E", padding: "8px 11px",
     borderRadius: 8, fontSize: 13, margin: 0 },
+
+  // Hvad en rettelse rører. Står øverst i dialogen, fordi det er det man
+  // skal vide FØR man trykker, ikke bagefter.
+  omfang: { background: "#F8FAFF", border: "1px solid #DDE4F5", borderRadius: 10,
+    padding: "11px 14px", marginBottom: 16 },
 
   // --- Billeddialog ---
   overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 300,

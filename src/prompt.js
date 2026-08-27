@@ -185,6 +185,192 @@ export function laesOpslag(raa, tilladteKanaler) {
   });
 }
 
+/* =====================================================================
+   Omskrivning af en eksisterende serie.
+
+   Forskellen fra en ny kampagne: opslagene findes allerede, og de skal
+   beholde deres nummer, tidspunkt og kanaler. Kun teksten skal ændres.
+   Derfor nummereres de i prompten og skal komme tilbage med samme nummer —
+   at stole på rækkefølgen alene ville flytte tekster mellem opslag den dag
+   modellen sprang et over.
+   ===================================================================== */
+
+export const OMSKRIV_SKEMA = {
+  type: "object",
+  properties: {
+    opslag: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          nr: { type: "integer" },
+          tekst: { type: "string" },
+          hashtags: { type: "array", items: { type: "string" } },
+          billedbrief: { type: "string" },
+        },
+        required: ["nr", "tekst", "hashtags"],
+      },
+    },
+  },
+  required: ["opslag"],
+};
+
+function opslagsliste(opslag) {
+  return opslag
+    .map((o, i) => {
+      const tags = (o.hashtags ?? []).map((t) => `#${t}`).join(" ");
+      const naar = o.scheduled_at
+        ? new Date(o.scheduled_at).toLocaleString("da-DK", {
+            weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit",
+          })
+        : "uden tidspunkt";
+      const kanaler = (o.maal ?? []).map((m) => m.platform).join(", ") || "ingen kanal";
+
+      return [
+        `--- OPSLAG ${i + 1} (${naar} · ${kanaler}) ---`,
+        o.tekst ?? o.body,
+        tags && `Hashtags: ${tags}`,
+        o.image_brief && `Billedbrief: ${o.image_brief}`,
+      ].filter(Boolean).join("\n");
+    })
+    .join("\n\n");
+}
+
+function omskrivOpgave({ brand, kampagne, opslag, instruks }) {
+  return `${brandBriefing(brand)}
+
+---
+
+KAMPAGNE: ${kampagne.name}
+${kampagne.brief ? `Oprindelig brief: ${kampagne.brief}` : ""}
+${kampagne.goal ? `Mål: ${kampagne.goal}` : ""}
+
+Her er de ${opslag.length} opslag som de ser ud nu:
+
+${opslagsliste(opslag)}
+
+---
+
+RET DEM SÅDAN: ${instruks}
+
+Behold nummereringen. Hvert opslag skal komme tilbage med sit eget "nr", så
+teksten havner på det rigtige opslag. Tidspunkter og kanaler ændres ikke — de
+står kun her, så du kan tage hensyn til dem.
+
+Rører en rettelse ikke et bestemt opslag, så send det uændret tilbage frem for
+at udelade det.`;
+}
+
+/** Til copy/paste i browseren. */
+export function byggOmskrivPrompt(args) {
+  return `${RETNINGSLINJER}
+
+---
+
+${omskrivOpgave(args)}
+
+Svar KUN med JSON i en \`\`\`json-blok:
+
+\`\`\`json
+{
+  "opslag": [
+    { "nr": 1, "tekst": "Den rettede tekst.", "hashtags": ["uden", "havelåge"], "billedbrief": "Valgfri." }
+  ]
+}
+\`\`\``;
+}
+
+/** Til `claude -p`, hvor skemaet håndhæver formen. */
+export function byggOmskrivOpgave(args) {
+  return `${RETNINGSLINJER}
+
+---
+
+${omskrivOpgave(args)}`;
+}
+
+/**
+ * Læser en omskrivning og parrer den med de opslag der faktisk må rettes.
+ *
+ * Numre uden for listen kastes væk i stedet for at give en fejl: kommer der et
+ * "nr": 9 tilbage på en serie med fem opslag, er det modellen der har regnet
+ * forkert, og de øvrige fire skal ikke gå tabt af den grund.
+ */
+export function laesOmskrivning(raa, antal) {
+  let data = raa;
+
+  if (typeof raa === "string") {
+    const tekst = raa.trim();
+    if (!tekst) throw new Error("Indsæt Claudes svar først.");
+
+    const blok = tekst.match(/```(?:json)?\s*([\s\S]*?)```/);
+    let kandidat = blok ? blok[1].trim() : tekst;
+
+    if (!blok) {
+      const start = kandidat.search(/[[{]/);
+      const slut = Math.max(kandidat.lastIndexOf("}"), kandidat.lastIndexOf("]"));
+      if (start === -1 || slut === -1) {
+        throw new Error("Kunne ikke finde JSON i det du indsatte.");
+      }
+      kandidat = kandidat.slice(start, slut + 1);
+    }
+
+    try {
+      data = JSON.parse(kandidat);
+    } catch (e) {
+      throw new Error(`JSON'en kunne ikke læses: ${e.message}`);
+    }
+  }
+
+  const liste = Array.isArray(data) ? data : data?.opslag;
+  if (!Array.isArray(liste) || !liste.length) {
+    throw new Error('Fandt ingen opslag. Forventede {"opslag": [ … ]}.');
+  }
+
+  const rettelser = new Map();
+
+  for (const o of liste) {
+    const nr = Number(o.nr);
+    if (!Number.isInteger(nr) || nr < 1 || nr > antal) continue;
+
+    const tekst = o.tekst ?? o.body;
+    if (typeof tekst !== "string" || !tekst.trim()) continue;
+
+    rettelser.set(nr, {
+      nr,
+      tekst: tekst.trim(),
+      hashtags: (Array.isArray(o.hashtags) ? o.hashtags : [])
+        .map((t) => String(t).replace(/^#/, "").trim()).filter(Boolean),
+      billedbrief: typeof o.billedbrief === "string" && o.billedbrief.trim()
+        ? o.billedbrief.trim()
+        : null,
+    });
+  }
+
+  if (!rettelser.size) {
+    throw new Error(
+      `Ingen af opslagene havde et gyldigt nummer mellem 1 og ${antal}. ` +
+        "Bad du Claude om at beholde nummereringen?",
+    );
+  }
+
+  return [...rettelser.values()].sort((a, b) => a.nr - b.nr);
+}
+
+/**
+ * Flytter en serie i tid med bevaret indbyrdes afstand.
+ *
+ * Klokkeslæt beholdes som det er, frem for at lægge timer til: rykker man en
+ * uge frem, skal et morgenopslag stadig ligge om morgenen — også hen over en
+ * sommertidsovergang, hvor et rent millisekund-tillæg ville flytte det en time.
+ */
+export function flytDage(iso, dage) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  d.setDate(d.getDate() + dage);
+  return d.toISOString();
+}
+
 /** Regner dag + klokke om til et rigtigt tidspunkt i lokal tid. */
 export function tidspunkt(start, dag, klokke) {
   const [t, m] = klokke.split(":").map(Number);

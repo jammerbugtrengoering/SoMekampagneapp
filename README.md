@@ -254,6 +254,36 @@ låne dit abonnement, for en server har ingen adgang til dit login.
 `NyKampagne` i stedet for indsæt-feltet. Cirka 0,20 kr per kampagne med fem
 opslag. Det er den vej der skal bruges når appen skal køre uden dig.
 
+## Ret en hel kampagne
+
+**Ret kampagnen** i kampagnetoolbaren. Fire tilstande:
+
+| Tilstand | Gør | Rører opslagene |
+|---|---|---|
+| Ret felter | Navn, brief, mål, periode | Nej |
+| Flyt i tid | Rykker serien, indbyrdes afstand bevaret | Kun `scheduled_at` |
+| Skriv om | De nuværende opslag sendes med + en instruks | Tekst og hashtags |
+| Ny brief | Serien skrives forfra, de gamle slettes | Ja, destruktivt |
+
+**Publicerede opslag røres aldrig.** De er ude i verden, og databasen skal
+fortælle sandheden om hvad der blev sendt. Skal de væk, skal det ske på
+Facebook eller Instagram.
+
+**Godkendte opslag spørges der om hver gang.** Som standard rettes kun kladder
+og opslag der afventer godkendelse. Vælger du at rette de godkendte med,
+trækkes godkendelsen automatisk — teksten er en anden nu, og den skal
+godkendes på ny.
+
+To ting i implementeringen der er værd at kende:
+
+Opslagene **nummereres** i omskrivnings-prompten, og rettelserne parres tilbage
+på nummer, ikke på rækkefølge. Springer modellen et opslag over, havner
+teksterne ellers på de forkerte opslag. Der er en test på netop det.
+
+Tidsforskydning bruger `setDate()`, ikke et millisekund-tillæg. Et morgenopslag
+skal stadig ligge om morgenen efter sommertidsovergangen — der er også en test
+på det, med 25. oktober 2026 som grænsetilfælde.
+
 ## Billeder
 
 Fire veje til et billede, under **Vaelg billede** paa hvert opslag:
