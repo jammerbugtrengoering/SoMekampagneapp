@@ -451,7 +451,8 @@ function Kampagneapp({ session, onLogUd }) {
           />
         ) : side === "kampagner" ? (
           <Kampagner
-            kampagner={kampagner} opslag={opslag} brandFor={brandFor} kanalerFor={kanalerFor}
+            kampagner={kampagner} opslag={opslag} brands={brands} kunder={kunder}
+            brandFor={brandFor} kanalerFor={kanalerFor}
             valgt={valgtKampagne} setValgt={setValgtKampagne}
             visToast={visToast} genindlaes={hentAlt}
           />
@@ -876,7 +877,8 @@ function Felt({ mrk, hjaelp, bredde, children }) {
    ===================================================================== */
 
 function Kampagner({
-  kampagner, opslag, brandFor, kanalerFor, valgt, setValgt, visToast, genindlaes,
+  kampagner, opslag, brands, kunder, brandFor, kanalerFor,
+  valgt, setValgt, visToast, genindlaes,
 }) {
   const [visIndex, setVisIndex] = useState(null);
   const [retter, setRetter] = useState(false);
@@ -952,6 +954,7 @@ function Kampagner({
         <RetKampagne
           kampagne={aktuel} liste={liste} brand={brand}
           kanaler={kanalerFor(aktuel.brand_id)}
+          brands={brands} kunder={kunder} kanalerFor={kanalerFor}
           visToast={visToast} genindlaes={genindlaes} onLuk={() => setRetter(false)}
         />
       )}
@@ -1166,7 +1169,10 @@ function inddelOpslag(liste) {
   };
 }
 
-function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, onLuk }) {
+function RetKampagne({
+  kampagne, liste, brand, kanaler, brands = [], kunder = [], kanalerFor = () => [],
+  visToast, genindlaes, onLuk,
+}) {
   const [tilstand, setTilstand] = useState("felter");
   const [medGodkendte, setMedGodkendte] = useState(false);
   const [venter, setVenter] = useState(false);
@@ -1205,6 +1211,27 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
 
   const skiftKanal = (id) =>
     setValgteKanaler((v) => (v.includes(id) ? v.filter((x) => x !== id) : [...v, id]));
+
+  // Flyt til et andet brand
+  const [nytBrandId, setNytBrandId] = useState(kampagne.brand_id);
+
+  // Platformene kampagnen bruger i dag. Det er dem der skal genfindes hos
+  // modtageren — kanal-id'erne kan ikke følge med, de hører til det gamle brand.
+  const brugtePlatforme = useMemo(() => {
+    const s = new Set();
+    for (const o of liste) for (const m of o.maal ?? []) if (m.platform && m.platform !== "?") s.add(m.platform);
+    return [...s];
+  }, [liste]);
+
+  const modtagerKanaler = useMemo(
+    () => (nytBrandId && nytBrandId !== kampagne.brand_id
+      ? kanalerFor(nytBrandId).filter((k) => k.active)
+      : []),
+    [nytBrandId, kampagne.brand_id, kanalerFor],
+  );
+
+  const manglendePlatforme = brugtePlatforme
+    .filter((p) => !modtagerKanaler.some((k) => k.platform === p));
 
   // Omskrivning og ny brief
   const [instruks, setInstruks] = useState("");
@@ -1317,6 +1344,73 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
         fjernet && `${fjernet} fjernet`,
         bevaret && `${bevaret} beholdt fordi de allerede er publiceret`,
       ].filter(Boolean).join(", ") || "Ingen ændringer.",
+    );
+  }
+
+  // ---- Flyt til et andet brand ----
+  /**
+   * Flytter hele kampagnen — kampagnen selv, alle opslag, og kanalmålene.
+   *
+   * Kanal-id'erne kan ikke bare følge med: en kanal hører til ét brand, og
+   * målene ville pege på den forkerte Facebook-side. Derfor oversættes de på
+   * platform — det gamle brands Facebook-mål bliver modtagerens Facebook-mål.
+   * Har modtageren ingen kanal på den platform, bliver målet væk, og det siger
+   * vi højt inden vi flytter.
+   *
+   * Er noget af kampagnen publiceret, flytter vi ikke. Opslaget står ude på en
+   * side der tilhører det gamle brand, og den historik skal ikke omskrives.
+   */
+  async function flytBrand() {
+    setFejl("");
+    if (!nytBrandId || nytBrandId === kampagne.brand_id) {
+      return setFejl("Vælg et andet brand end det kampagnen står på nu.");
+    }
+    if (publicerede.length) {
+      return setFejl(
+        `${publicerede.length} opslag er allerede publiceret under ${brand?.name}. ` +
+        "En publiceret kampagne kan ikke flyttes — opret i stedet en ny kampagne på det rigtige brand.",
+      );
+    }
+
+    setVenter(true);
+
+    // Nye mål bygges FØR vi sletter de gamle, så en fejl undervejs ikke
+    // efterlader opslag helt uden kanaler.
+    const nyeMaal = [];
+    for (const o of liste) {
+      const platforme = [...new Set((o.maal ?? []).map((m) => m.platform))];
+      for (const k of modtagerKanaler) {
+        if (platforme.includes(k.platform)) nyeMaal.push({ post_id: o.id, channel_id: k.id });
+      }
+    }
+
+    const gamleMaalIder = liste.flatMap((o) => (o.maal ?? []).map((m) => m.id));
+
+    const trin = [
+      supabase.from("campaigns").update({ brand_id: nytBrandId }).eq("id", kampagne.id),
+      supabase.from("posts").update({ brand_id: nytBrandId }).eq("campaign_id", kampagne.id),
+    ];
+    for (const t of trin) {
+      const { error } = await t;
+      if (error) { setVenter(false); return setFejl(error.message); }
+    }
+
+    if (gamleMaalIder.length) {
+      const { error } = await supabase.from("post_targets").delete().in("id", gamleMaalIder);
+      if (error) { setVenter(false); return setFejl(error.message); }
+    }
+    if (nyeMaal.length) {
+      const { error } = await supabase.from("post_targets").insert(nyeMaal);
+      if (error) { setVenter(false); return setFejl(error.message); }
+    }
+
+    setVenter(false);
+    const modtager = brands.find((b) => b.id === nytBrandId);
+    faerdig(
+      `${liste.length} opslag flyttet til ${modtager?.name ?? "det nye brand"}` +
+      (nyeMaal.length
+        ? `, med ${nyeMaal.length} kanalmål.`
+        : ". Opslagene har ingen kanaler endnu — sæt dem under fanen Kanaler."),
     );
   }
 
@@ -1465,12 +1559,15 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
   const TILSTANDE = [
     ["felter", "Ret felter"],
     ["kanaler", "Kanaler"],
+    ["flytbrand", "Flyt til kunde"],
     ["tid", "Flyt i tid"],
     ["omskriv", "Skriv om"],
     ["ny", "Ny brief"],
   ];
 
-  const roererOpslag = tilstand !== "felter";
+  // Flytningen tager hele kampagnen, ikke et udsnit — så tælleren "det her
+  // rører" ville sige noget forkert. Den har sin egen opsummering.
+  const roererOpslag = tilstand !== "felter" && tilstand !== "flytbrand";
 
   return (
     <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
@@ -1610,6 +1707,66 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
                 Kanaler der allerede er publiceret bliver stående, uanset fluebenet — opslaget
                 er ude i verden, og det skal databasen blive ved at vise.
               </p>
+            </>
+          )}
+
+          {/* ---- Flyt til kunde ---- */}
+          {tilstand === "flytbrand" && (
+            <>
+              <p style={styles.dæmpet}>
+                Flytter hele kampagnen — alle {liste.length} opslag — over på et andet brand.
+                Teksterne følger med som de er; kanalmålene oversættes på platform, så
+                Facebook bliver Facebook hos modtageren.
+              </p>
+
+              <div style={{ ...styles.omfang, marginTop: 14 }}>
+                <div style={styles.dt}>Står nu på</div>
+                <p style={{ margin: "6px 0 0", fontSize: 13.5 }}>
+                  <strong>{brand?.name}</strong>
+                  {brugtePlatforme.length > 0 &&
+                    ` · ${brugtePlatforme.map((p) => PLATFORM[p] ?? p).join(", ")}`}
+                </p>
+              </div>
+
+              <Felt mrk="Flyt til">
+                <select style={styles.input} value={nytBrandId ?? ""}
+                  onChange={(e) => setNytBrandId(e.target.value)}>
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {kunder.find((k) => k.id === b.customer_id)?.name ?? "Uden kunde"} — {b.name}
+                      {b.id === kampagne.brand_id ? " (står her nu)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </Felt>
+
+              {publicerede.length > 0 ? (
+                <p style={styles.fejlBoks}>
+                  {publicerede.length} af opslagene er publiceret under {brand?.name}. Kampagnen
+                  kan ikke flyttes — opslagene er ude på den gamle sides væg, og det skal
+                  databasen blive ved at vise. Lav en ny kampagne på det rigtige brand i stedet.
+                </p>
+              ) : (
+                <>
+                  {nytBrandId !== kampagne.brand_id && manglendePlatforme.length > 0 && (
+                    <p style={styles.advarselBoks}>
+                      Modtageren har ingen aktiv kanal på{" "}
+                      {manglendePlatforme.map((p) => PLATFORM[p] ?? p).join(" og ")}. Opslagene
+                      flyttes alligevel, men står uden kanal indtil du opretter den under Kunder
+                      og sætter fluebenet under Kanaler.
+                    </p>
+                  )}
+                  <p style={styles.dæmpetLille}>
+                    Bemærk: teksterne blev skrevet til {brand?.name}s tone. Passer de ikke til
+                    modtageren, så kør en omskrivning bagefter under fanen Skriv om.
+                  </p>
+                  <button style={styles.primaryBtn}
+                    disabled={venter || nytBrandId === kampagne.brand_id}
+                    onClick={flytBrand}>
+                    {venter ? "Flytter…" : `Flyt ${liste.length} opslag`}
+                  </button>
+                </>
+              )}
             </>
           )}
 

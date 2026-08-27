@@ -109,6 +109,7 @@ async function main() {
     const TILSTANDE = [
       ["omskriv", "Skriv teksterne om efter en instruks"],
       ["kanaler", "Ret hvilke kanaler opslagene går til"],
+      ["flytbrand", "Flyt hele kampagnen til et andet brand"],
       ["tid", "Flyt serien i tid"],
       ["felter", "Ret navn, brief, mål og periode"],
       ["ny", "Ny brief — skriv serien forfra (sletter de berørte)"],
@@ -205,6 +206,85 @@ async function main() {
 
       console.log(`\n${tilfoejet} tilføjet, ${fjernet} fjernet` +
         (bevaret ? `, ${bevaret} beholdt fordi de allerede er publiceret` : "") + ".");
+      return;
+    }
+
+    // ---- Flyt til et andet brand ----
+    //
+    // Hele kampagnen flytter, ikke et udsnit: en kampagne der står halvt på to
+    // brands giver ingen mening. Kanalmålene oversættes på platform, fordi et
+    // kanal-id hører til ét brand og ellers ville pege på den forkerte side.
+    if (tilstand === "flytbrand") {
+      if (publicerede.length) {
+        throw new Error(
+          `${publicerede.length} opslag er publiceret under ${brand?.name}. En publiceret ` +
+          "kampagne kan ikke flyttes — opret en ny på det rigtige brand i stedet.",
+        );
+      }
+
+      const { data: brands } = await db
+        .from("brands").select("*, customers(name)").order("name");
+
+      const andre = (brands ?? []).filter((b) => b.id !== kampagne.brand_id);
+      if (!andre.length) throw new Error("Der findes ikke andre brands at flytte til.");
+
+      console.log(`\nStår nu på: ${brand?.name}`);
+      console.log("\nFlyt til:");
+      andre.forEach((b, i) =>
+        console.log(`  ${i + 1}. ${b.customers?.name ?? "Uden kunde"} — ${b.name}`),
+      );
+
+      const valg = andre[Number(await spoerg(`Vælg (1-${andre.length}):`, "1")) - 1];
+      if (!valg) throw new Error("Ugyldigt valg.");
+
+      const { data: modtagerKanaler } = await db
+        .from("channels").select("*").eq("brand_id", valg.id).eq("active", true);
+
+      const brugte = [...new Set(alle.flatMap((o) => o.maal.map((m) => m.platform)).filter(Boolean))];
+      const mangler = brugte.filter((p) => !(modtagerKanaler ?? []).some((k) => k.platform === p));
+
+      if (mangler.length) {
+        console.log(`\nBEMÆRK: ${valg.name} har ingen aktiv kanal på ${mangler.join(" og ")}.`);
+        console.log("Opslagene flyttes alligevel, men står uden kanal der.");
+      }
+      console.log(`\nTeksterne er skrevet til ${brand?.name}s tone — overvej en omskrivning bagefter.`);
+
+      if (!(await jaTak(`Flyt alle ${alle.length} opslag til ${valg.name}?`))) {
+        console.log("Afbrudt."); return;
+      }
+
+      // Nye mål bygges før de gamle slettes, så en fejl ikke efterlader
+      // opslagene uden kanaler overhovedet.
+      const nyeMaal = [];
+      for (const o of alle) {
+        const platforme = [...new Set(o.maal.map((m) => m.platform))];
+        for (const k of modtagerKanaler ?? []) {
+          if (platforme.includes(k.platform)) nyeMaal.push({ post_id: o.id, channel_id: k.id });
+        }
+      }
+      const gamle = alle.flatMap((o) => o.maal.map((m) => m.id));
+
+      for (const t of [
+        db.from("campaigns").update({ brand_id: valg.id }).eq("id", kampagne.id),
+        db.from("posts").update({ brand_id: valg.id }).eq("campaign_id", kampagne.id),
+      ]) {
+        const { error } = await t;
+        if (error) throw new Error(error.message);
+      }
+
+      if (gamle.length) {
+        const { error } = await db.from("post_targets").delete().in("id", gamle);
+        if (error) throw new Error(error.message);
+      }
+      if (nyeMaal.length) {
+        const { error } = await db.from("post_targets").insert(nyeMaal);
+        if (error) throw new Error(error.message);
+      }
+
+      console.log(`\n${alle.length} opslag flyttet til ${valg.name}` +
+        (nyeMaal.length
+          ? `, med ${nyeMaal.length} kanalmål.`
+          : ". Sæt kanaler med tilstand 2."));
       return;
     }
 
