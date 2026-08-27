@@ -36,6 +36,7 @@ hemmelighed går gennem en Netlify-funktion:
 | `gem-kanal` | Krypterer og gemmer Meta-tokens, tester forbindelsen | Krypteringsnøglen findes kun på serveren |
 | `publicer-opslag` | "Publicér nu" | Tokens dekrypteres her; browseren ser dem aldrig |
 | `planlagt-publicering` | Cron hvert 15. min | Ingen brugersession bag et cron-kald |
+| `ai-baggrund` | Genererer en abstrakt baggrund | `GEMINI_API_KEY` maa ikke i klient-JS |
 
 Al publicering går gennem `publicerTilKanal()` i
 `netlify/functions/_lib/meta.js`. Skal du senere skifte til en aggregator som
@@ -200,10 +201,35 @@ sender, så resultaterne skifter ikke karakter når du gør det.
 
 Koster cirka 0,20 kr per kampagne med fem opslag.
 
-## Hvad der ikke er med endnu
+## Billeder
 
-- **Billedgenerering.** `image_brief` beskriver hvad billedet skal vise, men
-  billedet laves ikke. Billed-URL udfyldes manuelt indtil videre.
+Fire veje til et billede, under **Vaelg billede** paa hvert opslag:
+
+| Fane | Goer | Koster |
+|---|---|---|
+| Arkiv | Genbrug et billede kunden allerede har | - |
+| Upload | Kundens egne fotos ind i den offentlige bucket | - |
+| Skabelon | Tegner i browseren: brandfarve eller foto, overskrift, logo | - |
+| AI-baggrund | Abstrakt baggrund fra Gemini | 0,30-1 kr |
+
+**AI laver kun baggrunde** - flader, teksturer, stemninger. Aldrig mennesker,
+lokaler eller tekst i billedet. Det er et bevidst valg: begge kunder saelger
+paa at vaere aegte og lokale, og et opdigtet foto af "vores folk" arbejder imod
+det. For foreningen ville AI-boern desuden omgaa samtykke-spoergsmaalet paa den
+forkerte maade. Vil du have tekst paa en AI-baggrund, saa gem den i arkivet og
+vaelg den som baggrund under Skabelon.
+
+Skabelonerne tegnes med canvas - ingen server, ingen afhaengigheder. Billedet
+uploades til bucket'en, som **skal** vaere public: Meta henter selv billedet fra
+URL'en og kan ikke logge ind.
+
+To ting i tegnekoden der er vaerd at kende, hvis du retter i den: billeder
+hentes med `crossOrigin = "anonymous"`, ellers bliver canvas'et tainted og
+`toBlob` fejler med en sikkerhedsfejl der intet siger om aarsagen. Og lange
+danske ord som "fraflytningsrengoering" brydes med bindestreg - uden det loeb
+de ud over kanten.
+
+## Hvad der ikke er med endnu
 - **LinkedIn.** Kaster en tydelig fejl. LinkedIn vil have billedet uploadet til
   sig først, modsat Meta der selv henter fra en URL — det er reelt arbejde.
 - **Retry.** `kanGentages` skelner allerede mellem rate limits og rigtige fejl,

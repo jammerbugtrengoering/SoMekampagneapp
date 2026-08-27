@@ -4,6 +4,9 @@ import {
   Loader2, LogOut, Plus, RefreshCw, Send, Sparkles, Trash2, Users, X,
 } from "lucide-react";
 import { supabase, kaldApi, opsaetningsfejl } from "./supabaseClient";
+import {
+  FORMATER, base64TilBlob, foersteLinje, tegnSkabelon, uploadBillede,
+} from "./billeder";
 
 /* =====================================================================
    Kampagneapp — planlægger og publicerer opslag for flere kunder.
@@ -1036,9 +1039,17 @@ function OpslagKort({ opslag, brand, visToast, genindlaes }) {
   const [tags, setTags] = useState((opslag.hashtags ?? []).join(" "));
   const [billedUrl, setBilledUrl] = useState(opslag.image_url ?? "");
   const [tid, setTid] = useState(tilInputVaerdi(opslag.scheduled_at));
+  const [vaelger, setVaelger] = useState(false);
 
   const st = STATUS[opslag.status] ?? STATUS.draft;
   const blokeret = manglerBillede(opslag);
+
+  async function saetBillede(url) {
+    const { error } = await supabase.from("posts").update({ image_url: url }).eq("id", opslag.id);
+    if (error) { visToast(error.message, false); return; }
+    setBilledUrl(url);
+    await genindlaes();
+  }
 
   async function gem() {
     setVenter("gem");
@@ -1151,6 +1162,12 @@ function OpslagKort({ opslag, brand, visToast, genindlaes }) {
           ) : (
             <p style={{ ...styles.dæmpetLille, color: "#B45309" }}>Intet billede tilknyttet.</p>
           )}
+
+          <div style={{ marginTop: 8 }}>
+            <button style={styles.secondaryBtn} onClick={() => setVaelger(true)}>
+              <ImageIcon size={15} /> {opslag.image_url ? "Skift billede" : "Vælg billede"}
+            </button>
+          </div>
         </>
       )}
 
@@ -1186,7 +1203,333 @@ function OpslagKort({ opslag, brand, visToast, genindlaes }) {
           {m.kanalNavn || PLATFORM[m.platform]}: {m.fejl}
         </p>
       ))}
+
+      {vaelger && brand && (
+        <BilledVaelger
+          brand={brand} opslag={opslag} visToast={visToast}
+          onValgt={saetBillede} onLuk={() => setVaelger(false)}
+        />
+      )}
     </article>
+  );
+}
+
+/* =====================================================================
+   Billeder
+
+   Fire veje til et billede: arkivet, upload, en skabelon tegnet i
+   browseren, og en AI-baggrund. De tre første koster ingenting.
+   ===================================================================== */
+
+function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
+  const [fane, setFane] = useState("arkiv");
+  const [arkiv, setArkiv] = useState([]);
+  const [henter, setHenter] = useState(true);
+  const [venter, setVenter] = useState("");
+  const [fejl, setFejl] = useState("");
+
+  const hentArkiv = useCallback(async () => {
+    setHenter(true);
+    const { data } = await supabase
+      .from("assets").select("*").eq("brand_id", brand.id)
+      .order("created_at", { ascending: false }).limit(60);
+    setArkiv(data ?? []);
+    setHenter(false);
+  }, [brand.id]);
+
+  useEffect(() => { hentArkiv(); }, [hentArkiv]);
+
+  async function gem(blob, kilde, opskrift, filnavn) {
+    setFejl("");
+    setVenter(kilde);
+    try {
+      const { url } = await uploadBillede({
+        brandId: brand.id, blob, kilde, opskrift, filnavn,
+        altTekst: opslag ? foersteLinje(opslag.body, 120) : null,
+      });
+      await onValgt(url);
+      visToast("Billede tilknyttet.");
+      onLuk();
+    } catch (e) {
+      setFejl(e.message);
+    } finally {
+      setVenter("");
+    }
+  }
+
+  const faner = [
+    ["arkiv", "Arkiv"],
+    ["upload", "Upload"],
+    ["skabelon", "Skabelon"],
+    ["ai", "AI-baggrund"],
+  ];
+
+  return (
+    <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
+      <div style={styles.dialog}>
+        <div style={styles.dialogHoved}>
+          <h2 style={{ ...styles.h2, margin: 0 }}>Billede til opslaget</h2>
+          <div style={{ flex: 1 }} />
+          <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
+        </div>
+
+        <div style={styles.faner}>
+          {faner.map(([id, mrk]) => (
+            <button key={id} style={fane === id ? styles.faneAktiv : styles.fane}
+              onClick={() => { setFane(id); setFejl(""); }}>
+              {mrk}
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.dialogKrop}>
+          {fejl && <p style={styles.fejlBoks}>{fejl}</p>}
+
+          {fane === "arkiv" && (
+            henter ? <p style={styles.dæmpet}>Henter arkivet…</p>
+            : !arkiv.length ? (
+              <p style={styles.dæmpet}>
+                Arkivet er tomt. Upload et foto, eller lav et skabelon-billede.
+              </p>
+            ) : (
+              <div style={styles.arkivGitter}>
+                {arkiv.map((a) => (
+                  <button key={a.id} style={styles.arkivKort}
+                    onClick={async () => { await onValgt(a.url); visToast("Billede tilknyttet."); onLuk(); }}>
+                    <img src={a.url} alt={a.alt_text ?? ""} style={styles.arkivBillede} />
+                    <span style={styles.arkivMrk}>
+                      {a.source === "skabelon" ? "skabelon" : a.source === "ai" ? "ai" : "foto"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )
+          )}
+
+          {fane === "upload" && (
+            <UploadFane venter={venter === "upload"} onFil={(fil) => gem(fil, "upload", null, fil.name)} />
+          )}
+
+          {fane === "skabelon" && (
+            <SkabelonFane brand={brand} opslag={opslag} arkiv={arkiv} venter={venter === "skabelon"}
+              onGem={(blob, opskrift) => gem(blob, "skabelon", opskrift)} />
+          )}
+
+          {fane === "ai" && (
+            <AiFane venter={venter === "ai"} onFejl={setFejl}
+              onBillede={(blob, beskrivelse) => gem(blob, "ai", { beskrivelse })} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UploadFane({ venter, onFil }) {
+  const [navn, setNavn] = useState("");
+
+  return (
+    <div>
+      <p style={styles.dæmpet}>
+        Kundens egne fotos. De ender i den offentlige bucket, som Meta henter fra.
+      </p>
+      <label style={{ ...styles.dropzone, opacity: venter ? 0.6 : 1 }}>
+        <ImageIcon size={22} color="#64748B" />
+        <span style={{ fontWeight: 500 }}>{venter ? "Uploader…" : "Vælg et billede"}</span>
+        <span style={styles.dæmpetLille}>{navn || "JPEG eller PNG"}</span>
+        <input type="file" accept="image/jpeg,image/png,image/webp" style={{ display: "none" }}
+          disabled={venter}
+          onChange={(e) => {
+            const fil = e.target.files?.[0];
+            if (fil) { setNavn(fil.name); onFil(fil); }
+          }} />
+      </label>
+      <p style={styles.dæmpetLille}>
+        Har du samtykke til billeder af personer? Det er ikke noget appen kan tjekke.
+      </p>
+    </div>
+  );
+}
+
+function SkabelonFane({ brand, opslag, arkiv, venter, onGem }) {
+  const [format, setFormat] = useState("kvadrat");
+  const [baggrund, setBaggrund] = useState("");
+  const [overskrift, setOverskrift] = useState(() => foersteLinje(opslag?.body ?? "", 90));
+  const [under, setUnder] = useState("");
+  const [forhaandsvisning, setForhaandsvisning] = useState(null);
+  const [tegner, setTegner] = useState(false);
+  const [tegnefejl, setTegnefejl] = useState("");
+
+  const fotos = arkiv.filter((a) => a.source !== "skabelon");
+  const opskrift = { format, baggrund, overskrift, under };
+
+  const tegn = useCallback(async () => {
+    setTegner(true); setTegnefejl("");
+    try {
+      const blob = await tegnSkabelon({
+        format,
+        baggrundUrl: baggrund || null,
+        baggrundFarve: brand.colors?.primary ?? "#2F5DE0",
+        accentFarve: brand.colors?.accent ?? "#FFFFFF",
+        overskrift, underTekst: under,
+        logoUrl: brand.logo_url || null,
+      });
+      setForhaandsvisning({ blob, url: URL.createObjectURL(blob) });
+    } catch (e) {
+      setTegnefejl(e.message);
+      setForhaandsvisning(null);
+    } finally {
+      setTegner(false);
+    }
+  }, [format, baggrund, overskrift, under, brand]);
+
+  // Ryd op efter object-URL'er, ellers holder browseren på hver eneste
+  // forhåndsvisning indtil fanen lukkes.
+  useEffect(() => () => { if (forhaandsvisning) URL.revokeObjectURL(forhaandsvisning.url); },
+    [forhaandsvisning]);
+
+  return (
+    <div style={styles.toKolonner}>
+      <div>
+        <Felt mrk="Format">
+          <select style={styles.input} value={format} onChange={(e) => setFormat(e.target.value)}>
+            {Object.entries(FORMATER).map(([id, f]) => (
+              <option key={id} value={id}>{f.navn} — {f.hint}</option>
+            ))}
+          </select>
+        </Felt>
+
+        <Felt mrk="Baggrund"
+          hjaelp={baggrund ? "Foto med mørk gradient forneden, så teksten kan læses."
+            : "Uden foto bruges kundens brandfarve som flade."}>
+          <select style={styles.input} value={baggrund} onChange={(e) => setBaggrund(e.target.value)}>
+            <option value="">Brandfarve (rent grafisk)</option>
+            {fotos.map((a) => (
+              <option key={a.id} value={a.url}>
+                {a.tags?.[0] || a.alt_text?.slice(0, 40) || "Foto"}
+              </option>
+            ))}
+          </select>
+        </Felt>
+
+        <Felt mrk="Overskrift">
+          <textarea style={{ ...styles.input, minHeight: 70, fontFamily: "inherit" }}
+            value={overskrift} onChange={(e) => setOverskrift(e.target.value)} />
+        </Felt>
+
+        <Felt mrk="Underrubrik (valgfri)">
+          <input style={styles.input} value={under} onChange={(e) => setUnder(e.target.value)}
+            placeholder="fx Ring 43 22 18 04" />
+        </Felt>
+
+        <button style={styles.secondaryBtn} onClick={tegn} disabled={tegner}>
+          {tegner ? <><Loader2 size={15} /> Tegner…</> : "Vis forhåndsvisning"}
+        </button>
+
+        {tegnefejl && <p style={styles.fejlBoks}>{tegnefejl}</p>}
+
+        {!fotos.length && (
+          <p style={styles.dæmpetLille}>
+            Der er ingen fotos i arkivet endnu — upload nogle, hvis du vil have foto som baggrund.
+          </p>
+        )}
+      </div>
+
+      <div>
+        {forhaandsvisning ? (
+          <>
+            <img src={forhaandsvisning.url} alt="Forhåndsvisning" style={styles.forhaandsvisning} />
+            <button style={{ ...styles.primaryBtn, marginTop: 10 }} disabled={venter}
+              onClick={() => onGem(forhaandsvisning.blob, opskrift)}>
+              {venter ? <><Loader2 size={15} /> Gemmer…</> : "Brug dette billede"}
+            </button>
+          </>
+        ) : (
+          <div style={styles.tomForhaandsvisning}>
+            <ImageIcon size={26} color="#94A3B8" />
+            <span style={styles.dæmpetLille}>Tryk «Vis forhåndsvisning»</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AiFane({ venter, onBillede, onFejl }) {
+  const [beskrivelse, setBeskrivelse] = useState("");
+  const [format, setFormat] = useState("kvadrat");
+  const [henter, setHenter] = useState(false);
+  const [resultat, setResultat] = useState(null);
+
+  useEffect(() => () => { if (resultat) URL.revokeObjectURL(resultat.url); }, [resultat]);
+
+  async function generer() {
+    setHenter(true);
+    onFejl("");
+    const svar = await kaldApi("ai-baggrund", { beskrivelse, format });
+    setHenter(false);
+
+    if (!svar.ok) { onFejl(svar.fejl); return; }
+
+    const blob = base64TilBlob(svar.base64, svar.mimeType);
+    setResultat({ blob, url: URL.createObjectURL(blob) });
+  }
+
+  return (
+    <div style={styles.toKolonner}>
+      <div>
+        <p style={styles.dæmpet}>
+          Kun baggrunde — flader, teksturer, stemninger. Ingen mennesker, ingen lokaler,
+          ingen tekst i billedet.
+        </p>
+        <p style={styles.dæmpetLille}>
+          Det er et bevidst valg. Begge kunder sælger på at være ægte og lokale, og et
+          opdigtet foto af «vores folk» arbejder imod det. Læg selv tekst på bagefter med
+          skabelonen.
+        </p>
+
+        <div style={{ marginTop: 14 }}>
+          <Felt mrk="Format">
+            <select style={styles.input} value={format} onChange={(e) => setFormat(e.target.value)}>
+              {Object.entries(FORMATER).map(([id, f]) => (
+                <option key={id} value={id}>{f.navn}</option>
+              ))}
+            </select>
+          </Felt>
+
+          <Felt mrk="Hvad skal baggrunden vise">
+            <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit" }}
+              value={beskrivelse} onChange={(e) => setBeskrivelse(e.target.value)}
+              placeholder="fx Blødt morgenlys på en ren, lys flade. Rolige grå og grønne toner." />
+          </Felt>
+
+          <button style={styles.secondaryBtn} disabled={henter || !beskrivelse.trim()} onClick={generer}>
+            {henter ? <><Loader2 size={15} /> Genererer…</> : <><Sparkles size={15} /> Generér baggrund</>}
+          </button>
+          <p style={styles.dæmpetLille}>Koster omkring 0,30–1 kr per billede.</p>
+        </div>
+      </div>
+
+      <div>
+        {resultat ? (
+          <>
+            <img src={resultat.url} alt="AI-baggrund" style={styles.forhaandsvisning} />
+            <button style={{ ...styles.primaryBtn, marginTop: 10 }} disabled={venter}
+              onClick={() => onBillede(resultat.blob, beskrivelse)}>
+              {venter ? <><Loader2 size={15} /> Gemmer…</> : "Gem i arkivet og brug"}
+            </button>
+            <p style={styles.dæmpetLille}>
+              Vil du have tekst på, så gem den her og vælg den som baggrund under Skabelon.
+            </p>
+          </>
+        ) : (
+          <div style={styles.tomForhaandsvisning}>
+            <Sparkles size={26} color="#94A3B8" />
+            <span style={styles.dæmpetLille}>Ingen baggrund endnu</span>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1522,6 +1865,39 @@ const styles = {
   miniatur: { marginTop: 10, maxHeight: 190, maxWidth: "100%", borderRadius: 8, objectFit: "cover" },
   opslagHandlinger: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
     marginTop: 14, paddingTop: 14, borderTop: "1px solid #E7EAF3" },
+
+  // --- Billeddialog ---
+  overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 300,
+    display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 16px",
+    overflowY: "auto" },
+  dialog: { background: "#fff", borderRadius: 14, width: "100%", maxWidth: 900,
+    boxShadow: "0 20px 50px rgba(15,23,42,0.28)", overflow: "hidden" },
+  dialogHoved: { display: "flex", alignItems: "center", gap: 10, padding: "16px 20px 12px" },
+  faner: { display: "flex", gap: 4, padding: "0 20px", borderBottom: "1px solid #E7EAF3" },
+  fane: { border: "none", background: "transparent", color: "#64748B", cursor: "pointer",
+    fontSize: 13.5, fontWeight: 500, padding: "9px 12px", borderBottom: "2px solid transparent",
+    fontFamily: "inherit" },
+  faneAktiv: { border: "none", background: "transparent", color: "#2F5DE0", cursor: "pointer",
+    fontSize: 13.5, fontWeight: 600, padding: "9px 12px", borderBottom: "2px solid #2F5DE0",
+    fontFamily: "inherit" },
+  dialogKrop: { padding: 20 },
+
+  arkivGitter: { display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))" },
+  arkivKort: { position: "relative", border: "1px solid #E7EAF3", borderRadius: 10, padding: 0,
+    background: "#fff", cursor: "pointer", overflow: "hidden", aspectRatio: "1 / 1" },
+  arkivBillede: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+  arkivMrk: { position: "absolute", left: 6, bottom: 6, background: "rgba(15,23,42,0.72)",
+    color: "#fff", fontSize: 10, borderRadius: 4, padding: "1px 5px", letterSpacing: "0.03em" },
+
+  dropzone: { display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+    padding: "32px 20px", border: "2px dashed #CBD5E1", borderRadius: 12, cursor: "pointer",
+    background: "#F8FAFF", margin: "12px 0" },
+
+  forhaandsvisning: { width: "100%", borderRadius: 10, display: "block",
+    border: "1px solid #E7EAF3" },
+  tomForhaandsvisning: { display: "flex", flexDirection: "column", alignItems: "center",
+    justifyContent: "center", gap: 8, minHeight: 220, borderRadius: 10,
+    border: "1px dashed #CBD5E1", background: "#F8FAFF" },
 
   loginWrap: { minHeight: "100vh", background: "#F4F6FC", display: "flex", alignItems: "center",
     justifyContent: "center", padding: 20 },
