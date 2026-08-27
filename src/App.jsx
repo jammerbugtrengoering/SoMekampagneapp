@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle, Calendar, Check, ChevronLeft, ChevronRight, Image as ImageIcon,
-  Loader2, LogOut, Plus, RefreshCw, Send, Sparkles, Trash2, Users, X,
+  AlertTriangle, Calendar, Check, ChevronLeft, ChevronRight, Eye,
+  Image as ImageIcon, Loader2, LogOut, Plus, RefreshCw, Send, Sparkles,
+  Trash2, Users, X,
 } from "lucide-react";
 import { supabase, kaldApi, opsaetningsfejl } from "./supabaseClient";
 import {
   FORMATER, base64TilBlob, foersteLinje, tegnSkabelon, uploadBillede,
 } from "./billeder";
 import { byggPrompt, laesOpslag, tidspunkt } from "./prompt";
+import { REGLER, fuldTekst, klip, tjekOpslag } from "./kanalregler";
 
 /* =====================================================================
    Kampagneapp — planlægger og publicerer opslag for flere kunder.
@@ -840,6 +842,7 @@ function Felt({ mrk, hjaelp, bredde, children }) {
    ===================================================================== */
 
 function Kampagner({ kampagner, opslag, brandFor, valgt, setValgt, visToast, genindlaes }) {
+  const [visIndex, setVisIndex] = useState(null);
   const aktuel = kampagner.find((k) => k.id === valgt) ?? kampagner[0];
 
   if (!kampagner.length) {
@@ -861,6 +864,11 @@ function Kampagner({ kampagner, opslag, brandFor, valgt, setValgt, visToast, gen
             </option>
           ))}
         </select>
+        {liste.length > 0 && (
+          <button style={styles.secondaryBtn} onClick={() => setVisIndex(0)}>
+            <Eye size={15} /> Forhåndsvis serien
+          </button>
+        )}
       </div>
 
       {aktuel && (
@@ -883,19 +891,25 @@ function Kampagner({ kampagner, opslag, brandFor, valgt, setValgt, visToast, gen
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 16 }}>
-            {liste.map((o) => (
-              <OpslagKort key={o.id} opslag={o} brand={brand} visToast={visToast} genindlaes={genindlaes} />
+            {liste.map((o, i) => (
+              <OpslagKort key={o.id} opslag={o} brand={brand} visToast={visToast}
+                genindlaes={genindlaes} onForhaandsvis={() => setVisIndex(i)} />
             ))}
           </div>
 
           {!liste.length && <p style={styles.dæmpet}>Kampagnen har ingen opslag.</p>}
         </>
       )}
+
+      {visIndex !== null && (
+        <Forhaandsvisning liste={liste} startIndex={visIndex} brandFor={brandFor}
+          onLuk={() => setVisIndex(null)} />
+      )}
     </>
   );
 }
 
-function OpslagKort({ opslag, brand, visToast, genindlaes }) {
+function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
   const [aaben, setAaben] = useState(false);
   const [venter, setVenter] = useState("");
   const [tekst, setTekst] = useState(opslag.body);
@@ -985,6 +999,11 @@ function OpslagKort({ opslag, brand, visToast, genindlaes }) {
           </span>
         )}
         <div style={{ flex: 1 }} />
+        {onForhaandsvis && (
+          <button style={styles.linkBtnLille} onClick={onForhaandsvis}>
+            <Eye size={13} /> Forhåndsvis
+          </button>
+        )}
         <button style={styles.linkBtnLille} onClick={() => setAaben(!aaben)}>
           {aaben ? <><X size={13} /> Luk</> : "Redigér"}
         </button>
@@ -1074,6 +1093,209 @@ function OpslagKort({ opslag, brand, visToast, genindlaes }) {
         />
       )}
     </article>
+  );
+}
+
+/* =====================================================================
+   Forhåndsvisning
+
+   Viser opslaget som det læses i et feed — men vigtigst: hvor teksten
+   bliver klippet. Det skjulte stykke vises nedtonet i stedet for at være
+   væk, så du kan se præcis hvad der forsvinder bag «Se mere».
+
+   Det er en attrap i vores eget værktøj, ikke en efterligning af
+   platformene. Derfor står der «Forhåndsvisning» i toppen, og der er
+   hverken logoer eller varemærker.
+   ===================================================================== */
+
+function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
+  const [index, setIndex] = useState(startIndex);
+  const [visning, setVisning] = useState("mobil");
+  const opslag = liste[index];
+  const brand = opslag ? brandFor(opslag.brand_id) : null;
+
+  // Kanaler opslaget faktisk skal ud på; ellers Facebook som udgangspunkt.
+  const platforme = useMemo(() => {
+    const p = [...new Set((opslag?.maal ?? []).map((m) => m.platform))].filter((x) => REGLER[x]);
+    return p.length ? p : ["facebook"];
+  }, [opslag]);
+
+  const [platform, setPlatform] = useState(platforme[0]);
+
+  useEffect(() => {
+    if (!platforme.includes(platform)) setPlatform(platforme[0]);
+  }, [platforme, platform]);
+
+  const gaa = useCallback(
+    (retning) => setIndex((i) => Math.min(Math.max(i + retning, 0), liste.length - 1)),
+    [liste.length],
+  );
+
+  // Piletaster. Det er hele pointen med at kunne bladre igennem serien:
+  // man ser rytmen mellem opslagene, ikke bare det enkelte.
+  useEffect(() => {
+    const tast = (e) => {
+      if (e.key === "ArrowRight") gaa(1);
+      else if (e.key === "ArrowLeft") gaa(-1);
+      else if (e.key === "Escape") onLuk();
+    };
+    window.addEventListener("keydown", tast);
+    return () => window.removeEventListener("keydown", tast);
+  }, [gaa, onLuk]);
+
+  if (!opslag) return null;
+
+  const regel = REGLER[platform];
+  const tekst = fuldTekst(opslag);
+  const graense = visning === "mobil" ? regel.klipMobil : regel.klipDesktop;
+  const { synlig, skjult, klippet } = klip(tekst, graense);
+  const advarsler = tjekOpslag(opslag, platform);
+
+  const farve = brand?.colors?.primary ?? "#64748B";
+  const initialer = (brand?.name ?? "?").split(/\s+/).map((o) => o[0]).slice(0, 2).join("").toUpperCase();
+  const kanalNavn = (opslag.maal ?? []).find((m) => m.platform === platform)?.kanalNavn
+    || brand?.name || "Din side";
+
+  return (
+    <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
+      <div style={{ ...styles.dialog, maxWidth: 940 }}>
+        <div style={styles.dialogHoved}>
+          <h2 style={{ ...styles.h2, margin: 0 }}>Forhåndsvisning</h2>
+          <span style={styles.dæmpetLille}>
+            {index + 1} af {liste.length} · piletaster bladrer
+          </span>
+          <div style={{ flex: 1 }} />
+          <button style={styles.ikonBtn} disabled={index === 0} onClick={() => gaa(-1)}>
+            <ChevronLeft size={16} />
+          </button>
+          <button style={styles.ikonBtn} disabled={index === liste.length - 1} onClick={() => gaa(1)}>
+            <ChevronRight size={16} />
+          </button>
+          <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
+        </div>
+
+        <div style={styles.faner}>
+          {platforme.map((p) => (
+            <button key={p} style={platform === p ? styles.faneAktiv : styles.fane}
+              onClick={() => setPlatform(p)}>
+              {REGLER[p].navn}
+            </button>
+          ))}
+          <div style={{ flex: 1 }} />
+          {["mobil", "computer"].map((v) => (
+            <button key={v} style={visning === v ? styles.faneAktiv : styles.fane}
+              onClick={() => setVisning(v)}>
+              {v === "mobil" ? "Mobil" : "Computer"}
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.dialogKrop}>
+          <div style={styles.toKolonner}>
+            {/* ---- Feed-attrappen ---- */}
+            <div style={{ maxWidth: visning === "mobil" ? 400 : "100%", margin: "0 auto", width: "100%" }}>
+              <div style={styles.feedKort}>
+                <div style={styles.feedHoved}>
+                  <span style={{ ...styles.feedAvatar, background: farve }}>{initialer}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={styles.feedNavn}>{kanalNavn}</div>
+                    <div style={styles.feedTid}>
+                      {opslag.scheduled_at
+                        ? new Date(opslag.scheduled_at).toLocaleString("da-DK", {
+                            day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+                          })
+                        : "Ikke planlagt"}
+                      {" · "}Alle
+                    </div>
+                  </div>
+                </div>
+
+                {platform === "instagram" && opslag.image_url && (
+                  <img src={opslag.image_url} alt="" style={styles.feedBilledeFoerst} />
+                )}
+
+                <p style={styles.feedTekst}>
+                  {synlig}
+                  {klippet && (
+                    <>
+                      <span style={styles.feedSkjult}>{skjult}</span>
+                      <span style={styles.feedSeMere}>… Se mere</span>
+                    </>
+                  )}
+                </p>
+
+                {platform !== "instagram" && opslag.image_url && (
+                  <img src={opslag.image_url} alt="" style={styles.feedBillede} />
+                )}
+
+                {platform !== "instagram" && !opslag.image_url && (
+                  <div style={styles.feedUdenBillede}>
+                    <ImageIcon size={18} color="#94A3B8" />
+                    <span style={styles.dæmpetLille}>Uden billede</span>
+                  </div>
+                )}
+
+                <div style={styles.feedHandlinger}>
+                  <span>Synes godt om</span><span>Kommentér</span><span>Del</span>
+                </div>
+              </div>
+
+              {klippet && (
+                <p style={styles.dæmpetLille}>
+                  Det nedtonede er skjult bag «Se mere» — {skjult.trim().length} tegn.
+                  {visning === "mobil"
+                    ? ` Mobil klipper ved ${graense} tegn.`
+                    : ` Computer klipper ved ${graense} tegn.`}
+                </p>
+              )}
+            </div>
+
+            {/* ---- Tal og advarsler ---- */}
+            <div>
+              <div style={styles.talRaekke}>
+                <Nøgletal mrk="Tegn" tal={tekst.length}
+                  advarsel={tekst.length > regel.maks * 0.9} kritisk={tekst.length > regel.maks} />
+                <Nøgletal mrk="Hashtags" tal={(opslag.hashtags ?? []).length}
+                  kritisk={(opslag.hashtags ?? []).length > regel.maksHashtags} />
+                <Nøgletal mrk="Synligt før klip" tal={klippet ? synlig.length : tekst.length} />
+              </div>
+
+              {advarsler.length ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {advarsler.map((a, i) => (
+                    <p key={i} style={
+                      a.grad === "stop" ? styles.fejlBoks
+                      : a.grad === "advarsel" ? styles.advarselBoks
+                      : { ...styles.dæmpetLille, margin: 0 }
+                    }>
+                      {a.tekst}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p style={styles.okBoks}>Ingen indvendinger til {regel.navn}.</p>
+              )}
+
+              <dl style={styles.definitioner}>
+                <dt style={styles.dt}>Kunde</dt><dd style={styles.dd}>{brand?.name ?? "—"}</dd>
+                <dt style={styles.dt}>Status</dt>
+                <dd style={styles.dd}>{(STATUS[opslag.status] ?? STATUS.draft).navn}</dd>
+                <dt style={styles.dt}>Kanaler</dt>
+                <dd style={styles.dd}>
+                  {(opslag.maal ?? []).map((m) => PLATFORM[m.platform]).join(", ") || "ingen"}
+                </dd>
+                {opslag.image_brief && (
+                  <>
+                    <dt style={styles.dt}>Billedbrief</dt>
+                    <dd style={styles.dd}>{opslag.image_brief}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1728,6 +1950,32 @@ const styles = {
   miniatur: { marginTop: 10, maxHeight: 190, maxWidth: "100%", borderRadius: 8, objectFit: "cover" },
   opslagHandlinger: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
     marginTop: 14, paddingTop: 14, borderTop: "1px solid #E7EAF3" },
+
+  // --- Feed-attrap i forhåndsvisningen ---
+  // Genkendeligt som et feed, men uden logoer eller varemærker: det er vores
+  // eget værktøj, ikke en efterligning af platformene.
+  feedKort: { background: "#fff", border: "1px solid #DDE1E7", borderRadius: 10,
+    overflow: "hidden", boxShadow: "0 1px 3px rgba(15,23,42,0.08)" },
+  feedHoved: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px 8px" },
+  feedAvatar: { width: 38, height: 38, borderRadius: "50%", color: "#fff", display: "flex",
+    alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13, flex: "0 0 auto" },
+  feedNavn: { fontWeight: 600, fontSize: 14.5, color: "#0F172A" },
+  feedTid: { fontSize: 12, color: "#64748B" },
+  feedTekst: { margin: 0, padding: "2px 14px 12px", fontSize: 15, lineHeight: 1.45,
+    whiteSpace: "pre-wrap", color: "#0F172A" },
+  // Det skjulte vises nedtonet frem for at være væk — så kan man se hvad
+  // der forsvinder bag «Se mere», i stedet for at gætte.
+  feedSkjult: { color: "#B6BEC9" },
+  feedSeMere: { color: "#64748B", fontWeight: 600 },
+  feedBillede: { width: "100%", display: "block", maxHeight: 420, objectFit: "cover" },
+  feedBilledeFoerst: { width: "100%", display: "block", aspectRatio: "1 / 1", objectFit: "cover" },
+  feedUdenBillede: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+    padding: "22px 14px", background: "#F1F5F9", borderTop: "1px solid #E7EAF3" },
+  feedHandlinger: { display: "flex", justifyContent: "space-around", padding: "9px 14px",
+    borderTop: "1px solid #E7EAF3", fontSize: 13, color: "#64748B", fontWeight: 500 },
+
+  advarselBoks: { background: "#FDF3E0", color: "#92400E", padding: "8px 11px",
+    borderRadius: 8, fontSize: 13, margin: 0 },
 
   // --- Billeddialog ---
   overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 300,

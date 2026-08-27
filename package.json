@@ -15,7 +15,9 @@
     "kanaler": "node scripts/kanal.mjs --liste",
     "db:setup": "node scripts/setup-db.mjs",
     "admin:add": "node scripts/admin-add.mjs",
+    "test": "npm run test:publicering && npm run test:kanalregler",
     "test:publicering": "node scripts/test-publicering.mjs",
+    "test:kanalregler": "node scripts/test-kanalregler.mjs",
     "admin:list": "node scripts/admin-add.mjs --liste",
     "admin:remove": "node scripts/admin-add.mjs --fjern"
   },
