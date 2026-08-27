@@ -2520,6 +2520,7 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                   {kundensBrands.map((b) => (
                     <BrandBlok key={b.id} brand={b} kunde={kunde} kunder={kunder}
+                      soeskende={kundensBrands}
                       kanaler={kanalerFor(b.id)} visToast={visToast} genindlaes={genindlaes} />
                   ))}
 
@@ -2726,10 +2727,11 @@ function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
    Ét brand med sine kanaler
    --------------------------------------------------------------------- */
 
-function BrandBlok({ brand, kunde, kunder, kanaler, visToast, genindlaes }) {
+function BrandBlok({ brand, kunde, kunder, soeskende = [], kanaler, visToast, genindlaes }) {
   const [aaben, setAaben] = useState(false);
   const [nyKanal, setNyKanal] = useState(false);
   const [flytter, setFlytter] = useState(false);
+  const [sletter, setSletter] = useState(false);
 
   /**
    * Migrationen gav hvert eksisterende brand sin egen kunde, fordi den ikke
@@ -2753,8 +2755,48 @@ function BrandBlok({ brand, kunde, kunder, kanaler, visToast, genindlaes }) {
     await genindlaes();
   }
 
+  /**
+   * Sletter et brand der står tomt.
+   *
+   * Migrationen og et par forsøg giver let dubletter — to brands med samme
+   * navn, hvor kanalerne endte fordelt på begge. Når du har flyttet kanalerne
+   * sammen, skal den tomme kunne væk, ellers står den og forvirrer i hver
+   * eneste kampagnevælger.
+   *
+   * Vi sletter kun hvis brandet hverken har kanaler eller kampagner. Ellers
+   * ville cascade-reglen i basen tage opslag og publiceringshistorik med sig.
+   */
+  async function slet() {
+    if (kanaler.length) {
+      return visToast("Brandet har kanaler. Flyt eller slet dem først.", false);
+    }
+    setSletter(true);
+    const { count } = await supabase
+      .from("campaigns").select("id", { count: "exact", head: true }).eq("brand_id", brand.id);
+
+    if (count) {
+      setSletter(false);
+      return visToast(
+        `${brand.name} har ${count} kampagne(r). Flyt dem til et andet brand først ` +
+        "(Ret kampagnen → Flyt til kunde).", false,
+      );
+    }
+
+    if (!window.confirm(`Slet brandet "${brand.name}"? Det er tomt, så intet indhold går tabt.`)) {
+      setSletter(false);
+      return;
+    }
+
+    const { error } = await supabase.from("brands").delete().eq("id", brand.id);
+    setSletter(false);
+    if (error) return visToast(error.message, false);
+    visToast(`${brand.name} slettet.`);
+    await genindlaes();
+  }
+
   const aktive = kanaler.filter((k) => k.active);
   const udenToken = aktive.filter((k) => !k.token_ciphertext && !kunde?.token_ciphertext);
+  const tomt = kanaler.length === 0;
 
   return (
     <div style={styles.kort}>
@@ -2777,6 +2819,12 @@ function BrandBlok({ brand, kunde, kunder, kanaler, visToast, genindlaes }) {
             title="Flyt brandet til en anden kunde">
             {kunder.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
           </select>
+        )}
+        {tomt && (
+          <button style={styles.sletBtn} disabled={sletter} onClick={slet}
+            title="Sletter brandet, hvis det hverken har kanaler eller kampagner">
+            <Trash2 size={13} /> {sletter ? "Tjekker…" : "Slet"}
+          </button>
         )}
         <button style={styles.linkBtnLille} onClick={() => setAaben(!aaben)}>
           {aaben ? <><X size={13} /> Luk</> : "Åbn"}
@@ -2802,6 +2850,7 @@ function BrandBlok({ brand, kunde, kunder, kanaler, visToast, genindlaes }) {
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {kanaler.map((k) => (
                   <KanalKort key={k.id} kanal={k} brandId={brand.id} kunde={kunde}
+                    soeskende={soeskende}
                     visToast={visToast} genindlaes={genindlaes} />
                 ))}
                 {nyKanal && (
@@ -2938,7 +2987,7 @@ function Brandprofil({ brand, visToast, genindlaes }) {
   );
 }
 
-function KanalKort({ kanal, brandId, kunde, visToast, genindlaes }) {
+function KanalKort({ kanal, brandId, kunde, soeskende = [], visToast, genindlaes }) {
   const [platform, setPlatform] = useState(kanal?.platform ?? "facebook");
   const [visningsnavn, setVisningsnavn] = useState(kanal?.display_name ?? "");
   const [pageId, setPageId] = useState(kanal?.page_id ?? "");
@@ -2957,6 +3006,33 @@ function KanalKort({ kanal, brandId, kunde, visToast, genindlaes }) {
 
     if (!svar.ok) visToast(svar.fejl, false);
     else { visToast(svar.besked); setToken(""); await genindlaes(); }
+  }
+
+  /**
+   * Flytter kanalen til et andet af kundens brands.
+   *
+   * Det er den vej man kommer ud af en dublet: har man ved et uheld fået to
+   * brands, hvor Facebook ligger på det ene og Instagram på det andet, samles
+   * de her — i stedet for at oprette siden forfra med samme Page ID og så have
+   * den to steder.
+   *
+   * Kanalens publiceringshistorik følger med, fordi post_targets peger på
+   * kanalen. Opslag der allerede ER publiceret ligger derimod på det gamle
+   * brand — de flyttes med "Flyt til kunde" på kampagnen, hvis de skal med.
+   */
+  async function flytTilBrand(nytBrand) {
+    if (!nytBrand || nytBrand === brandId) return;
+    setVenter("flyt");
+    const svar = await kaldApi("gem-kanal", {
+      kanalId: kanal.id, brandId: nytBrand,
+      platform, visningsnavn, pageId, igUserId, tokenLabel, aktiv,
+    });
+    setVenter("");
+
+    if (!svar.ok) return visToast(svar.fejl, false);
+    const modtager = soeskende.find((b) => b.id === nytBrand);
+    visToast(`${visningsnavn} ligger nu under ${modtager?.name ?? "det nye brand"}.`);
+    await genindlaes();
   }
 
   async function test() {
@@ -2981,6 +3057,18 @@ function KanalKort({ kanal, brandId, kunde, visToast, genindlaes }) {
           <input style={styles.input} value={visningsnavn} onChange={(e) => setVisningsnavn(e.target.value)} />
         </Felt>
       </div>
+
+      {kanal && soeskende.length > 1 && (
+        <Felt mrk="Hører til brandet" bredde={280}
+          hjaelp="Flytter kanalen til et andet af kundens brands. Bruges til at samle en Facebook- og en Instagram-kanal der er endt på hver sit brand.">
+          <select style={styles.input} value={brandId} disabled={!!venter}
+            onChange={(e) => flytTilBrand(e.target.value)}>
+            {soeskende.map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+        </Felt>
+      )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <Felt mrk="Page ID" bredde={220}>

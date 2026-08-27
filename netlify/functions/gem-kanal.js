@@ -88,12 +88,26 @@ export default async function handler(req) {
     }
   }
 
+  // Et brandId på en eksisterende kanal betyder "flyt den hertil". Det er
+  // vejen ud af en dublet, hvor Facebook og Instagram er endt på hver sit
+  // brand — uden at oprette siden forfra med samme Page ID.
+  if (kanalId && brandId) felter.brand_id = brandId
+
   const forespoergsel = kanalId
     ? klient.from('channels').update(felter).eq('id', kanalId)
     : klient.from('channels').insert({ ...felter, brand_id: brandId })
 
   const { error } = await forespoergsel
-  if (error) return jsonSvar({ fejl: error.message }, 500)
+  if (error) {
+    // 23505 = unique (brand_id, platform, page_id). Sker når modtageren
+    // allerede har den samme side liggende.
+    return jsonSvar({
+      fejl: error.code === '23505'
+        ? 'Modtageren har allerede en kanal med samme platform og Page ID. ' +
+          'Deaktivér eller slet dubletten der i stedet.'
+        : error.message,
+    }, 500)
+  }
 
   return jsonSvar({
     ok: true,
