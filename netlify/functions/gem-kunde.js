@@ -16,6 +16,25 @@ import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
  * se om det faktisk dækker dem alle — det er den fejl man ellers først finder
  * når et opslag skulle publiceres.
  */
+/**
+ * Navn til slug.
+ *
+ * Danske bogstaver skal oversættes, ikke smides væk: uden dette bliver
+ * "Jammerbugt Rengøring" til "jammerbugt-reng-ring", og to kunder der kun
+ * adskiller sig ved et ø får samme slug.
+ */
+function lavSlug(navn) {
+  const s = String(navn ?? '')
+    .toLowerCase()
+    .replace(/æ/g, 'ae').replace(/ø/g, 'oe').replace(/å/g, 'aa')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  // Et tomt slug ville bryde unique-reglen anden gang det sker.
+  return s || `kunde-${Date.now().toString(36)}`
+}
+
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
 
@@ -122,16 +141,35 @@ export default async function handler(req) {
     }
   }
 
-  const forespoergsel = kundeId
-    ? klient.from('customers').update(opdatering).eq('id', kundeId)
-    : klient.from('customers').insert({
-        ...opdatering,
-        slug: opdatering.slug
-          || opdatering.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-      })
+  if (kundeId) {
+    const { error } = await klient.from('customers').update(opdatering).eq('id', kundeId)
+    if (error) return jsonSvar({ fejl: error.message }, 500)
+  } else {
+    const grundslug = opdatering.slug || lavSlug(opdatering.name)
+    let sidsteFejl = null
 
-  const { error } = await forespoergsel
-  if (error) return jsonSvar({ fejl: error.message }, 500)
+    // Slug er unik i basen. Hedder to kunder næsten det samme, eller findes
+    // der allerede en fra migrationen med samme navn, prøver vi med et
+    // løbenummer i stedet for at kaste en rå databasefejl i hovedet på folk.
+    for (let forsoeg = 0; forsoeg < 5; forsoeg++) {
+      const slug = forsoeg === 0 ? grundslug : `${grundslug}-${forsoeg + 1}`
+      const { error } = await klient.from('customers').insert({ ...opdatering, slug })
+
+      if (!error) { sidsteFejl = null; break }
+      sidsteFejl = error
+      // 23505 = unique_violation. Alt andet er en rigtig fejl, så vi stopper.
+      if (error.code !== '23505') break
+    }
+
+    if (sidsteFejl) {
+      return jsonSvar({
+        fejl: sidsteFejl.code === '42P01'
+          ? 'Tabellen customers findes ikke. Kør "npm run db:setup" — migration 0004 mangler.'
+          : sidsteFejl.message,
+        kode: sidsteFejl.code,
+      }, 500)
+    }
+  }
 
   return jsonSvar({
     ok: true,

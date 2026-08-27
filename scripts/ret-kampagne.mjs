@@ -65,13 +65,16 @@ async function main() {
     // ---- Hent opslagene ----
     const { data: raa } = await db
       .from("posts")
-      .select("*, post_targets(channels(platform))")
+      .select("*, post_targets(id, channel_id, status, channels(platform))")
       .eq("campaign_id", kampagne.id)
       .order("scheduled_at", { ascending: true });
 
     const alle = (raa ?? []).map((o) => ({
       ...o,
-      maal: (o.post_targets ?? []).map((m) => ({ platform: m.channels?.platform })),
+      maal: (o.post_targets ?? []).map((m) => ({
+        id: m.id, kanalId: m.channel_id, status: m.status,
+        platform: m.channels?.platform,
+      })),
     }));
 
     if (!alle.length) throw new Error("Kampagnen har ingen opslag.");
@@ -105,13 +108,14 @@ async function main() {
     // ---- Vælg tilstand ----
     const TILSTANDE = [
       ["omskriv", "Skriv teksterne om efter en instruks"],
+      ["kanaler", "Ret hvilke kanaler opslagene går til"],
       ["tid", "Flyt serien i tid"],
       ["felter", "Ret navn, brief, mål og periode"],
       ["ny", "Ny brief — skriv serien forfra (sletter de berørte)"],
     ];
     console.log("\nHvad vil du?");
     TILSTANDE.forEach(([, mrk], i) => console.log(`  ${i + 1}. ${mrk}`));
-    const tilstand = TILSTANDE[Number(await spoerg("Vælg (1-4):", "1")) - 1]?.[0];
+    const tilstand = TILSTANDE[Number(await spoerg(`Vælg (1-${TILSTANDE.length}):`, "1")) - 1]?.[0];
     if (!tilstand) throw new Error("Ugyldigt valg.");
 
     // ---- Ret felter ----
@@ -129,6 +133,78 @@ async function main() {
 
       if (error) throw new Error(error.message);
       console.log("\nKampagnen er rettet. Opslagene er urørte.");
+      return;
+    }
+
+    // ---- Kanaler ----
+    if (tilstand === "kanaler") {
+      const { data: kanaler } = await db
+        .from("channels").select("*").eq("brand_id", kampagne.brand_id).eq("active", true)
+        .order("platform");
+
+      if (!kanaler?.length) throw new Error("Kunden har ingen aktive kanaler. Kør npm run kanal.");
+
+      const daekning = new Map();
+      for (const o of alle) for (const m of o.maal) {
+        daekning.set(m.kanalId, (daekning.get(m.kanalId) ?? 0) + 1);
+      }
+
+      console.log("\nKanaler:");
+      kanaler.forEach((k, i) => {
+        const n = daekning.get(k.id) ?? 0;
+        console.log(`  ${i + 1}. ${k.platform} · ${k.display_name}` +
+          `  (${n} af ${alle.length} opslag bruger den)`);
+      });
+
+      const svar = await spoerg(
+        `Hvilke skal ALLE ${beroerte.length} berørte opslag ud på? Numre adskilt af komma:`,
+        kanaler.map((k, i) => (daekning.get(k.id) ? i + 1 : null)).filter(Boolean).join(",") || "1",
+      );
+
+      const valgte = svar.split(/[\s,]+/).map(Number)
+        .filter((n) => n >= 1 && n <= kanaler.length)
+        .map((n) => kanaler[n - 1].id);
+
+      if (!valgte.length) throw new Error("Ingen gyldige numre valgt.");
+
+      // Instagram afviser opslag uden billede — sig det før, ikke bagefter.
+      const igValgt = valgte.some((id) => kanaler.find((k) => k.id === id)?.platform === "instagram");
+      const udenBillede = beroerte.filter((o) => !o.image_url).length;
+      if (igValgt && udenBillede) {
+        console.log(`\nBEMÆRK: ${udenBillede} af opslagene har intet billede. Instagram afviser dem.`);
+      }
+
+      console.log("\nVælger: " + valgte.map((id) => {
+        const k = kanaler.find((x) => x.id === id);
+        return `${k.platform}/${k.display_name}`;
+      }).join(", "));
+
+      if (!(await jaTak("Gem?", "ja"))) { console.log("Afbrudt."); return; }
+
+      let tilfoejet = 0, fjernet = 0, bevaret = 0;
+      for (const o of beroerte) {
+        const nuvaerende = new Map(o.maal.map((m) => [m.kanalId, m]));
+
+        for (const id of valgte) {
+          if (nuvaerende.has(id)) continue;
+          const { error } = await db.from("post_targets")
+            .insert({ post_id: o.id, channel_id: id });
+          if (error) throw new Error(error.message);
+          tilfoejet++;
+        }
+
+        for (const [id, m] of nuvaerende) {
+          if (valgte.includes(id)) continue;
+          // Publicerede mål slettes ikke: opslaget ER ude på den kanal.
+          if (m.status === "published") { bevaret++; continue; }
+          const { error } = await db.from("post_targets").delete().eq("id", m.id);
+          if (error) throw new Error(error.message);
+          fjernet++;
+        }
+      }
+
+      console.log(`\n${tilfoejet} tilføjet, ${fjernet} fjernet` +
+        (bevaret ? `, ${bevaret} beholdt fordi de allerede er publiceret` : "") + ".");
       return;
     }
 

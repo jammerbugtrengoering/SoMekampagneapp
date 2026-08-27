@@ -342,6 +342,7 @@ function Kampagneapp({ session, onLogUd }) {
         ...o,
         maal: (o.post_targets ?? []).map((m) => ({
           id: m.id,
+          kanalId: m.channel_id,
           status: m.status,
           fejl: m.error,
           permalink: m.permalink,
@@ -1184,6 +1185,27 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
   // Tid
   const [dage, setDage] = useState(7);
 
+  // Kanaler. Startværdien er de kanaler der allerede dækker MINDST ét af de
+  // berørte opslag — så et flueben betyder "alle skal ud her", og et tomt
+  // felt betyder "ingen".
+  const kanalDaekning = useMemo(() => {
+    const tal = new Map();
+    for (const o of liste) {
+      for (const m of o.maal ?? []) {
+        tal.set(m.kanalId ?? m.id, (tal.get(m.kanalId ?? m.id) ?? 0) + 1);
+      }
+    }
+    return tal;
+  }, [liste]);
+
+  const [valgteKanaler, setValgteKanaler] = useState(() =>
+    kanaler.filter((k) => k.active && liste.some((o) =>
+      (o.maal ?? []).some((m) => m.kanalId === k.id))).map((k) => k.id),
+  );
+
+  const skiftKanal = (id) =>
+    setValgteKanaler((v) => (v.includes(id) ? v.filter((x) => x !== id) : [...v, id]));
+
   // Omskrivning og ny brief
   const [instruks, setInstruks] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -1250,6 +1272,51 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
     setVenter(false);
     faerdig(
       `${beroerte.length} opslag flyttet ${Math.abs(dage)} dage ${dage < 0 ? "tilbage" : "frem"}.`,
+    );
+  }
+
+  // ---- Kanaler ----
+  /**
+   * Sætter kanalerne på de berørte opslag.
+   *
+   * Et mål der allerede er publiceret slettes ikke: opslaget ER ude på den
+   * kanal, og databasen skal blive ved at fortælle sandheden om det. Fjerner
+   * du en kanal, forsvinder den altså kun fra det der endnu ikke er sendt.
+   */
+  async function gemKanaler() {
+    setFejl("");
+    if (!beroerte.length) return setFejl("Ingen opslag at rette.");
+
+    setVenter(true);
+    let tilfoejet = 0, fjernet = 0, bevaret = 0;
+
+    for (const o of beroerte) {
+      const nuvaerende = new Map((o.maal ?? []).map((m) => [m.kanalId, m]));
+
+      for (const id of valgteKanaler) {
+        if (nuvaerende.has(id)) continue;
+        const { error } = await supabase
+          .from("post_targets").insert({ post_id: o.id, channel_id: id });
+        if (error) { setVenter(false); return setFejl(error.message); }
+        tilfoejet++;
+      }
+
+      for (const [id, m] of nuvaerende) {
+        if (valgteKanaler.includes(id)) continue;
+        if (m.status === "published") { bevaret++; continue; }
+        const { error } = await supabase.from("post_targets").delete().eq("id", m.id);
+        if (error) { setVenter(false); return setFejl(error.message); }
+        fjernet++;
+      }
+    }
+
+    setVenter(false);
+    faerdig(
+      [
+        tilfoejet && `${tilfoejet} kanal-tilknytninger tilføjet`,
+        fjernet && `${fjernet} fjernet`,
+        bevaret && `${bevaret} beholdt fordi de allerede er publiceret`,
+      ].filter(Boolean).join(", ") || "Ingen ændringer.",
     );
   }
 
@@ -1397,6 +1464,7 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
 
   const TILSTANDE = [
     ["felter", "Ret felter"],
+    ["kanaler", "Kanaler"],
     ["tid", "Flyt i tid"],
     ["omskriv", "Skriv om"],
     ["ny", "Ny brief"],
@@ -1482,6 +1550,66 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
               <button style={styles.primaryBtn} disabled={venter} onClick={gemFelter}>
                 {venter ? "Gemmer…" : "Gem"}
               </button>
+            </>
+          )}
+
+          {/* ---- Kanaler ---- */}
+          {tilstand === "kanaler" && (
+            <>
+              <p style={styles.dæmpet}>
+                Sæt flueben ved de kanaler alle de berørte opslag skal ud på. Kanalerne blev
+                bundet da kampagnen blev oprettet — er en kanal kommet til siden, tilføjes den her.
+              </p>
+
+              {!kanaler.filter((k) => k.active).length ? (
+                <p style={{ ...styles.fejlBoks, marginTop: 14 }}>
+                  Kunden har ingen aktive kanaler. Opret dem under Kunder først.
+                </p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, margin: "16px 0" }}>
+                  {kanaler.filter((k) => k.active).map((k) => {
+                    const daekker = kanalDaekning.get(k.id) ?? 0;
+                    const valgt = valgteKanaler.includes(k.id);
+                    // Instagram afviser opslag uden billede — det er bedre at
+                    // sige det her end at lade cron'en fejle i morgen tidlig.
+                    const udenBillede = k.platform === "instagram" && valgt
+                      ? beroerte.filter((o) => !o.image_url).length
+                      : 0;
+
+                    return (
+                      <div key={k.id} style={styles.kanalValg}>
+                        <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
+                          <input type="checkbox" checked={valgt} onChange={() => skiftKanal(k.id)} />
+                          <span>
+                            <strong>{PLATFORM[k.platform]}</strong> · {k.display_name}
+                            <br />
+                            <span style={styles.dæmpetLille}>
+                              {daekker === 0
+                                ? "ingen opslag bruger den i dag"
+                                : `${daekker} af ${liste.length} opslag bruger den i dag`}
+                            </span>
+                          </span>
+                        </label>
+
+                        {udenBillede > 0 && (
+                          <p style={{ ...styles.advarselBoks, marginTop: 8 }}>
+                            {udenBillede} af de berørte opslag har intet billede. Instagram afviser
+                            dem — tilknyt billeder, ellers kan de ikke godkendes.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <button style={styles.primaryBtn} disabled={venter} onClick={gemKanaler}>
+                {venter ? "Gemmer…" : `Sæt kanaler på ${beroerte.length} opslag`}
+              </button>
+              <p style={styles.dæmpetLille}>
+                Kanaler der allerede er publiceret bliver stående, uanset fluebenet — opslaget
+                er ude i verden, og det skal databasen blive ved at vise.
+              </p>
             </>
           )}
 
@@ -2886,6 +3014,8 @@ const styles = {
   // skal vide FØR man trykker, ikke bagefter.
   omfang: { background: "#F8FAFF", border: "1px solid #DDE4F5", borderRadius: 10,
     padding: "11px 14px", marginBottom: 16 },
+  kanalValg: { border: "1px solid #E7EAF3", borderRadius: 10, padding: "11px 13px",
+    fontSize: 14 },
 
   // --- Billeddialog ---
   overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 300,

@@ -96,6 +96,10 @@ drop policy if exists "admins styrer kunder" on public.customers;
 create policy "admins styrer kunder" on public.customers
   for all using (public.er_admin()) with check (public.er_admin());
 
+-- drop først: kører migrationen halvvejs og bliver kørt igen, ville et
+-- create trigger uden dette fejle på at triggeren allerede findes — og så
+-- ville migrationen aldrig blive markeret som gennemført.
+drop trigger if exists customers_touch on public.customers;
 create trigger customers_touch before update on public.customers
   for each row execute function public.touch_updated_at();
 
@@ -119,3 +123,13 @@ select
 from public.channels ch
 join public.brands b on b.id = ch.brand_id
 left join public.customers cu on cu.id = b.customer_id;
+
+-- ---------------------------------------------------------------------
+-- Bed PostgREST om at læse skemaet forfra.
+--
+-- Supabases API-lag holder et cachet billede af skemaet. Uden det her kan
+-- en ny tabel svare "Could not find the table in the schema cache" i op til
+-- et minut efter migrationen — en fejl der ligner at migrationen ikke virkede.
+-- ---------------------------------------------------------------------
+notify pgrst, 'reload schema';
+
