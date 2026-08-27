@@ -1,0 +1,274 @@
+/**
+ * Retter en eksisterende kampagne gennem dit Claude-abonnement.
+ *
+ *   npm run ret
+ *
+ * Samme fire tilstande som i appen: skriv om, flyt i tid, ret felter, ny
+ * brief. Forskellen er at Claude kaldes direkte i stedet for copy/paste.
+ *
+ * To regler, de samme som i appen:
+ *   - publicerede opslag røres aldrig
+ *   - godkendte opslag spørges der om, og godkendelsen trækkes hvis de rettes
+ */
+
+import { createInterface } from "node:readline/promises";
+import { createClient } from "@supabase/supabase-js";
+import { laesEnv } from "./lib/mgmt.mjs";
+import { spoergClaude } from "./lib/claude.mjs";
+import {
+  KAMPAGNE_SKEMA, OMSKRIV_SKEMA, byggOmskrivOpgave, byggOpgave,
+  flytDage, laesOmskrivning, laesOpslag, tidspunkt,
+} from "../src/prompt.js";
+
+const env = { ...laesEnv(), ...process.env };
+
+function klient() {
+  const url = env.SUPABASE_URL || env.VITE_SUPABASE_URL;
+  const noegle = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !noegle) throw new Error("SUPABASE_URL og SUPABASE_SECRET_KEY skal stå i .env.");
+  return createClient(url, noegle, { auth: { persistSession: false } });
+}
+
+const visTid = (iso) =>
+  iso
+    ? new Date(iso).toLocaleString("da-DK", {
+        weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+      })
+    : "uden tidspunkt";
+
+async function main() {
+  const db = klient();
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const spoerg = async (t, standard = "") => {
+    const s = (await rl.question(standard ? `${t} [${standard}] ` : `${t} `)).trim();
+    return s || standard;
+  };
+  const jaTak = async (t, standard = "nej") =>
+    (await spoerg(`${t} (ja/nej)`, standard)).toLowerCase().startsWith("j");
+
+  try {
+    // ---- Vælg kampagne ----
+    const { data: kampagner } = await db
+      .from("campaigns").select("*, brands(*)").order("created_at", { ascending: false }).limit(20);
+
+    if (!kampagner?.length) throw new Error("Ingen kampagner endnu. Kør npm run kampagne.");
+
+    console.log("\nKampagner:");
+    kampagner.forEach((k, i) =>
+      console.log(`  ${i + 1}. ${k.brands?.name} — ${k.name}${k.starts_on ? ` (fra ${k.starts_on})` : ""}`),
+    );
+    const kampagne = kampagner[Number(await spoerg(`Vælg (1-${kampagner.length}):`, "1")) - 1];
+    if (!kampagne) throw new Error("Ugyldigt valg.");
+
+    const brand = kampagne.brands;
+
+    // ---- Hent opslagene ----
+    const { data: raa } = await db
+      .from("posts")
+      .select("*, post_targets(channels(platform))")
+      .eq("campaign_id", kampagne.id)
+      .order("scheduled_at", { ascending: true });
+
+    const alle = (raa ?? []).map((o) => ({
+      ...o,
+      maal: (o.post_targets ?? []).map((m) => ({ platform: m.channels?.platform })),
+    }));
+
+    if (!alle.length) throw new Error("Kampagnen har ingen opslag.");
+
+    const publicerede = alle.filter((o) => o.status === "published");
+    const godkendte = alle.filter((o) => o.status === "approved");
+    const frie = alle.filter((o) => !["published", "approved"].includes(o.status));
+
+    console.log(`\n${kampagne.name} — ${alle.length} opslag`);
+    alle.forEach((o, i) =>
+      console.log(`  ${i + 1}. [${o.status}] ${visTid(o.scheduled_at)} · ${o.body.split("\n")[0].slice(0, 58)}`),
+    );
+
+    if (publicerede.length) {
+      console.log(`\n${publicerede.length} publiceret — de røres ikke.`);
+    }
+
+    let beroerte = frie;
+    if (godkendte.length) {
+      console.log(`\n${godkendte.length} opslag er godkendt.`);
+      if (await jaTak("Skal de rettes med? Godkendelsen trækkes så")) {
+        beroerte = [...frie, ...godkendte].sort(
+          (a, b) => new Date(a.scheduled_at ?? 0) - new Date(b.scheduled_at ?? 0),
+        );
+      }
+    }
+
+    if (!beroerte.length) throw new Error("Ingen opslag at rette.");
+    console.log(`\nRetter ${beroerte.length} opslag.`);
+
+    // ---- Vælg tilstand ----
+    const TILSTANDE = [
+      ["omskriv", "Skriv teksterne om efter en instruks"],
+      ["tid", "Flyt serien i tid"],
+      ["felter", "Ret navn, brief, mål og periode"],
+      ["ny", "Ny brief — skriv serien forfra (sletter de berørte)"],
+    ];
+    console.log("\nHvad vil du?");
+    TILSTANDE.forEach(([, mrk], i) => console.log(`  ${i + 1}. ${mrk}`));
+    const tilstand = TILSTANDE[Number(await spoerg("Vælg (1-4):", "1")) - 1]?.[0];
+    if (!tilstand) throw new Error("Ugyldigt valg.");
+
+    // ---- Ret felter ----
+    if (tilstand === "felter") {
+      const navn = await spoerg("Navn:", kampagne.name);
+      const brief = await spoerg("Brief:", kampagne.brief ?? "");
+      const maal = await spoerg("Mål:", kampagne.goal ?? "");
+      const start = await spoerg("Start:", kampagne.starts_on ?? "");
+      const slut = await spoerg("Slut:", kampagne.ends_on ?? "");
+
+      const { error } = await db.from("campaigns").update({
+        name: navn, brief: brief || null, goal: maal || null,
+        starts_on: start || null, ends_on: slut || null,
+      }).eq("id", kampagne.id);
+
+      if (error) throw new Error(error.message);
+      console.log("\nKampagnen er rettet. Opslagene er urørte.");
+      return;
+    }
+
+    // ---- Flyt i tid ----
+    if (tilstand === "tid") {
+      const dage = Number(await spoerg("Antal dage (negativt for tilbage):", "7"));
+      if (!Number.isInteger(dage) || dage === 0) throw new Error("Skriv et helt tal forskelligt fra 0.");
+
+      const foerste = beroerte.find((o) => o.scheduled_at);
+      if (foerste) {
+        console.log(
+          `\nFørste opslag: ${visTid(foerste.scheduled_at)} → ${visTid(flytDage(foerste.scheduled_at, dage))}`,
+        );
+      }
+      if (!(await jaTak(`Flyt ${beroerte.length} opslag?`, "ja"))) {
+        console.log("Afbrudt."); return;
+      }
+
+      for (const o of beroerte) {
+        if (!o.scheduled_at) continue;
+        const { error } = await db.from("posts")
+          .update({ scheduled_at: flytDage(o.scheduled_at, dage) }).eq("id", o.id);
+        if (error) throw new Error(error.message);
+      }
+
+      const skub = (d) => (d ? flytDage(`${d}T12:00:00`, dage).slice(0, 10) : null);
+      await db.from("campaigns")
+        .update({ starts_on: skub(kampagne.starts_on), ends_on: skub(kampagne.ends_on) })
+        .eq("id", kampagne.id);
+
+      console.log(`\n${beroerte.length} opslag flyttet ${Math.abs(dage)} dage ${dage < 0 ? "tilbage" : "frem"}.`);
+      return;
+    }
+
+    // ---- Skriv om ----
+    if (tilstand === "omskriv") {
+      const instruks = await spoerg("Hvad skal rettes?");
+      if (!instruks) throw new Error("Instruks mangler.");
+
+      console.log("\nSpørger Claude…\n");
+      const svar = await spoergClaude(
+        byggOmskrivOpgave({
+          brand, kampagne, instruks,
+          opslag: beroerte.map((o) => ({ ...o, tekst: o.body })),
+        }),
+        OMSKRIV_SKEMA,
+        env.CLAUDE_MODEL,
+      );
+
+      const rettelser = laesOmskrivning(svar, beroerte.length);
+      console.log(`Fik ${rettelser.length} rettelser:\n`);
+      for (const r of rettelser) {
+        const gammel = beroerte[r.nr - 1];
+        console.log(`  ${r.nr}. FØR: ${gammel.body.split("\n")[0].slice(0, 66)}`);
+        console.log(`     EFTER: ${r.tekst.split("\n")[0].slice(0, 66)}\n`);
+      }
+
+      if (!(await jaTak("Gem rettelserne?", "ja"))) { console.log("Afbrudt."); return; }
+
+      let rettet = 0;
+      for (const r of rettelser) {
+        const maal = beroerte[r.nr - 1];
+        if (!maal) continue;
+
+        const felter = { body: r.tekst, hashtags: r.hashtags };
+        if (r.billedbrief) felter.image_brief = r.billedbrief;
+        // Teksten er en anden nu — godkendelsen skal gives på ny.
+        if (maal.status === "approved") felter.status = "needs_approval";
+
+        const { error } = await db.from("posts").update(felter).eq("id", maal.id);
+        if (error) throw new Error(error.message);
+        rettet++;
+      }
+
+      console.log(`\n${rettet} opslag omskrevet.`);
+      return;
+    }
+
+    // ---- Ny brief ----
+    const { data: kanalRaekker } = await db
+      .from("channels").select("*").eq("brand_id", kampagne.brand_id).eq("active", true);
+
+    const kanaler = [...new Set((kanalRaekker ?? []).map((k) => k.platform))];
+    if (!kanaler.length) throw new Error("Kunden har ingen aktive kanaler. Kør npm run kanal.");
+
+    const nyBrief = await spoerg("Ny brief:", kampagne.brief ?? "");
+    if (!nyBrief) throw new Error("Brief mangler.");
+    const antal = Number(await spoerg("Antal opslag:", String(beroerte.length)));
+    const start = kampagne.starts_on ?? new Date().toISOString().slice(0, 10);
+
+    console.log("\nSpørger Claude…\n");
+    const svar = await spoergClaude(
+      byggOpgave({
+        brand, navn: kampagne.name, brief: nyBrief, maal: kampagne.goal ?? "",
+        antal, kanaler, start, slut: kampagne.ends_on ?? "",
+      }),
+      KAMPAGNE_SKEMA,
+      env.CLAUDE_MODEL,
+    );
+
+    const nye = laesOpslag(svar, kanaler);
+    console.log(`Fik ${nye.length} nye opslag:\n`);
+    for (const o of nye) {
+      console.log(`  dag ${o.dag} kl. ${o.klokke} · ${o.kanaler.join(", ")}`);
+      console.log(`  ${o.tekst.split("\n")[0].slice(0, 74)}\n`);
+    }
+
+    console.log(`Det ERSTATTER ${beroerte.length} eksisterende opslag, som slettes.`);
+    if (!(await jaTak("Fortsæt?"))) { console.log("Afbrudt. Intet slettet."); return; }
+
+    for (const o of beroerte) {
+      const { error } = await db.from("posts").delete().eq("id", o.id);
+      if (error) throw new Error(error.message);
+    }
+
+    let oprettede = 0;
+    for (const o of nye) {
+      const { data: raekke } = await db.from("posts").insert({
+        campaign_id: kampagne.id, brand_id: kampagne.brand_id, body: o.tekst,
+        hashtags: o.hashtags, image_brief: o.billedbrief,
+        scheduled_at: tidspunkt(start, o.dag, o.klokke), status: "needs_approval",
+      }).select().single();
+
+      if (!raekke) continue;
+      oprettede++;
+
+      const maalRaekker = (kanalRaekker ?? [])
+        .filter((k) => o.kanaler.includes(k.platform))
+        .map((k) => ({ post_id: raekke.id, channel_id: k.id }));
+      if (maalRaekker.length) await db.from("post_targets").insert(maalRaekker);
+    }
+
+    await db.from("campaigns").update({ brief: nyBrief }).eq("id", kampagne.id);
+    console.log(`\n${beroerte.length} gamle opslag erstattet af ${oprettede} nye kladder.`);
+  } finally {
+    rl.close();
+  }
+}
+
+main().catch((e) => {
+  console.error(`\nFejl: ${e.message}`);
+  process.exitCode = 1;
+});

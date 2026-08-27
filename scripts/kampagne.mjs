@@ -16,10 +16,10 @@
  * samt SUPABASE_SECRET_KEY i .env.
  */
 
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { createClient } from "@supabase/supabase-js";
 import { laesEnv } from "./lib/mgmt.mjs";
+import { spoergClaude } from "./lib/claude.mjs";
 import { KAMPAGNE_SKEMA, byggOpgave, laesOpslag, tidspunkt } from "../src/prompt.js";
 
 const env = { ...laesEnv(), ...process.env };
@@ -31,52 +31,6 @@ function klient() {
     throw new Error("SUPABASE_URL og SUPABASE_SECRET_KEY skal stå i .env.");
   }
   return createClient(url, noegle, { auth: { persistSession: false } });
-}
-
-/**
- * Kalder Claude Code.
- *
- * VIGTIGT: ingen --bare. Bare mode læser hverken OAuth-credentials eller
- * nøgleringen og kræver ANTHROPIC_API_KEY — altså præcis det vi vil undgå her.
- */
-function spoergClaude(opgave) {
-  return new Promise((klar, fejl) => {
-    const args = [
-      "-p", opgave,
-      "--output-format", "json",
-      "--json-schema", JSON.stringify(KAMPAGNE_SKEMA),
-    ];
-    if (env.CLAUDE_MODEL) args.push("--model", env.CLAUDE_MODEL);
-
-    const proces = spawn("claude", args, { stdio: ["ignore", "pipe", "pipe"] });
-
-    let ud = "", fejltekst = "";
-    proces.stdout.on("data", (d) => (ud += d));
-    proces.stderr.on("data", (d) => (fejltekst += d));
-
-    proces.on("error", (e) =>
-      fejl(new Error(
-        e.code === "ENOENT"
-          ? "Kunne ikke finde kommandoen 'claude'. Er Claude Code installeret og i din PATH?"
-          : e.message,
-      )),
-    );
-
-    proces.on("close", (kode) => {
-      if (kode !== 0) {
-        return fejl(new Error(`claude sluttede med kode ${kode}.\n${fejltekst || ud}`.trim()));
-      }
-      let svar;
-      try {
-        svar = JSON.parse(ud);
-      } catch {
-        return fejl(new Error(`Kunne ikke læse svaret fra claude:\n${ud.slice(0, 400)}`));
-      }
-      // structured_output når skemaet blev brugt; ellers falder vi tilbage på
-      // result-teksten, som laesOpslag kan pakke ud af en kodeblok.
-      klar(svar.structured_output ?? svar.result);
-    });
-  });
 }
 
 async function main() {
@@ -125,6 +79,8 @@ async function main() {
 
     const raa = await spoergClaude(
       byggOpgave({ brand, navn, brief, maal, antal, kanaler, start, slut }),
+      KAMPAGNE_SKEMA,
+      env.CLAUDE_MODEL,
     );
 
     const opslag = laesOpslag(raa, kanaler);

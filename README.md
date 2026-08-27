@@ -238,7 +238,7 @@ skifter vej.
 **1. Copy/paste i appen.** Byg prompten under Ny kampagne, kør den i Claude,
 indsæt JSON'en tilbage. Ingen opsætning, ingen udgift.
 
-**2. `npm run kampagne` — dit eget abonnement.** Kører `claude -p` lokalt.
+**2. `npm run kampagne` og `npm run ret` — dit eget abonnement.** Kører `claude -p` lokalt.
 Claude Code bruger dit almindelige abonnements-login, så der er ingen API-nøgle
 og ingen regning per kampagne. Scriptet spørger om kunde, brief og periode,
 viser opslagene, og gemmer dem som kladder når du siger ja.
@@ -264,6 +264,10 @@ opslag. Det er den vej der skal bruges når appen skal køre uden dig.
 | Flyt i tid | Rykker serien, indbyrdes afstand bevaret | Kun `scheduled_at` |
 | Skriv om | De nuværende opslag sendes med + en instruks | Tekst og hashtags |
 | Ny brief | Serien skrives forfra, de gamle slettes | Ja, destruktivt |
+
+Samme fire tilstande findes i terminalen med `npm run ret`, hvor Claude kaldes
+direkte gennem dit abonnement i stedet for copy/paste. Den viser **før og
+efter** på hver rettelse, før den gemmer noget.
 
 **Publicerede opslag røres aldrig.** De er ude i verden, og databasen skal
 fortælle sandheden om hvad der blev sendt. Skal de væk, skal det ske på

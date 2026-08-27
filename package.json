@@ -11,6 +11,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "kampagne": "node scripts/kampagne.mjs",
+    "ret": "node scripts/ret-kampagne.mjs",
     "kanal": "node scripts/kanal.mjs",
     "kanaler": "node scripts/kanal.mjs --liste",
     "db:setup": "node scripts/setup-db.mjs",
