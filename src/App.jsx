@@ -2128,7 +2128,9 @@ function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
       .order("created_at", { ascending: false }).limit(60);
     setArkiv(data ?? []);
     setHenter(false);
-  }, [brand.id]);
+    // customer_id skal med: flytter du brandet til en anden kunde, er det et
+    // andet fælles arkiv der gælder — uden den ville listen blive hængende.
+  }, [brand.id, brand.customer_id]);
 
   useEffect(() => { hentArkiv(); }, [hentArkiv]);
 
