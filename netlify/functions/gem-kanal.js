@@ -1,5 +1,5 @@
 import { krypter, maskeer } from './_lib/krypto.js'
-import { testKanal } from './_lib/meta.js'
+import { gaeldendeToken, testKanal } from './_lib/meta.js'
 import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
 
 /**
@@ -33,13 +33,14 @@ export default async function handler(req) {
 
     const { data: kanal } = await klient
       .from('channels')
-      .select('*')
+      .select('*, brands(customers(token_ciphertext))')
       .eq('id', krop.kanalId)
       .single()
 
     if (!kanal) return jsonSvar({ fejl: 'Kanalen findes ikke.' }, 404)
 
-    const res = await testKanal(kanal)
+    // Samme regel som ved publicering: kanalens eget token, ellers kundens.
+    const res = await testKanal({ ...kanal, token_ciphertext: gaeldendeToken(kanal) })
 
     await klient
       .from('channels')

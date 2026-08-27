@@ -34,13 +34,26 @@ export const KAMPAGNE_SKEMA = {
   required: ["opslag"],
 };
 
+/**
+ * Briefingen om brandet — og om kunden bag.
+ *
+ * Forbehold findes to steder: brandets egne, og kundens, der gælder alle
+ * dens brands. Jammerbugts regel om samtykke til billeder af medarbejdere
+ * gælder både rengøring, hundevask og vaskeri, og skal ikke skrives tre
+ * gange. Begge lister sendes med, kundens først.
+ */
 function brandBriefing(brand) {
+  const kunde = brand.customers ?? brand.kunde ?? null;
+  const forbud = [kunde?.guardrails, brand.guardrails].filter(Boolean).join("\n");
+
   return [
     `Virksomhed: ${brand.name}`,
+    kunde?.name && kunde.name !== brand.name && `Del af: ${kunde.name}`,
     brand.description && `Hvad de laver: ${brand.description}`,
     brand.target_audience && `Målgruppe: ${brand.target_audience}`,
     brand.tone_of_voice && `Tone of voice: ${brand.tone_of_voice}`,
-    brand.guardrails && `MÅ IKKE: ${brand.guardrails}`,
+    kunde?.samtykke && `Om samtykke og billeder: ${kunde.samtykke}`,
+    forbud && `MÅ IKKE:\n${forbud}`,
   ].filter(Boolean).join("\n");
 }
 

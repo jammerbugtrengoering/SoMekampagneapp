@@ -37,12 +37,49 @@ hemmelighed går gennem en Netlify-funktion:
 | `publicer-opslag` | "Publicér nu" | Tokens dekrypteres her; browseren ser dem aldrig |
 | `planlagt-publicering` | Cron hvert 15. min | Ingen brugersession bag et cron-kald |
 | `ai-baggrund` | Genererer en abstrakt baggrund | `GEMINI_API_KEY` maa ikke i klient-JS |
+| `claude-lokal` | Kalder `claude -p` paa din maskine | Kun lokalt; kan ikke starte processer i skyen |
+| `gem-kunde` | Stamkort og kundens faelles Meta-token, samt test mod alle kanaler | Krypteringsnoeglen findes kun paa serveren |
 
 Al publicering går gennem `publicerTilKanal()` i
 `netlify/functions/_lib/meta.js`. Skal du senere skifte til en aggregator som
 Ayrshare, er det den ene funktion du udskifter.
 
 ---
+
+## Kunde → brand → kanal
+
+```
+Kunde                      Brand (forretningsområde)     Kanal
+─────────────────────      ─────────────────────────     ──────────────────
+Jammerbugt Rengøring  ──┬─ Rengøring                 ──┬─ Facebook-side
+  kontaktperson         │    tone, målgruppe, farver   └─ Instagram
+  aftale, samtykke      │    egen må-ikke-liste
+  ét systemtoken        ├─ Hundevask                 ──── Facebook-side
+  fælles må-ikke        └─ Vaskeri                   ──── Facebook-side
+```
+
+**Tokenet ligger på kunden.** Et Meta-systemtoken hører til en
+Business-portefølje og dækker de sider systembrugeren er tildelt — ét token
+til alle Jammerbugts sider, ét sted at rotere det. En kanal kan have sit eget
+token som nødudgang, hvis en side ligger i en anden portefølje; kanalens eget
+vinder altid. Reglen står som `gaeldendeToken()` i `_lib/meta.js` og som
+view'et `kanal_med_token` i migration 0004, så app og funktioner svarer ens.
+
+**Må-ikke-lister lægges sammen.** Kundens gælder alle dens brands, brandets
+gælder kun det ene. Jammerbugts regel om samtykke til medarbejderbilleder
+skrives ét sted, ikke tre.
+
+**Brands har hver sin stemme.** Hundevask taler ikke som erhvervsrengøring,
+selvom de er samme kunde. Tone, målgruppe, farver og logo hører på brandet.
+
+**Billedarkivet findes begge steder.** Et billede hører enten til ét brand
+eller til hele kunden — firmabiler og medarbejdere passer til flere brands, et
+brandet opslag gør ikke. Databasen håndhæver at præcis én af de to er sat.
+
+Migration 0004 giver hvert eksisterende brand sin egen kunde, fordi den ikke
+kan gætte hvilke der hører sammen. Du samler dem bagefter med
+**vælgeren i brandets hovedlinje** under Kunder → Brands og kanaler. Kanaler og
+opslag følger med, for de hænger på brandet.
 
 ## Adgang
 
@@ -133,9 +170,11 @@ administrerer.
 5. Generér token med `pages_manage_posts`, `pages_read_engagement`,
    `instagram_basic`, `instagram_content_publish`
 
-Systembruger-tokens udløber ikke. Har hver kunde sin egen Business-portefølje,
-får du **ét token per kunde** — tokenet ligger på kanalen, ikke på kunden, så
-det er der ikke noget at lave om for.
+Systembruger-tokens udløber ikke, og **ét token dækker hele porteføljen** —
+alle de sider systembrugeren er tildelt. Tokenet indsættes derfor på **kunden**
+under Kunder → Stamkort, ikke på hver enkelt kanal. Knappen **Test alle
+kanaler** prøver det mod hver af kundens sider og siger hvilke der ikke kunne
+nås; det er den fejl man ellers først finder når et opslag skulle publiceres.
 
 ```bash
 # Dine sider
@@ -235,10 +274,30 @@ koden alligevel prøver at ringe til Meta.
 Alle tre bruger `src/prompt.js`, så resultaterne skifter ikke karakter når du
 skifter vej.
 
-**1. Copy/paste i appen.** Byg prompten under Ny kampagne, kør den i Claude,
-indsæt JSON'en tilbage. Ingen opsætning, ingen udgift.
+**1. «Kør i Claude» i appen — uden copy/paste.** Kræver at appen kører lokalt:
 
-**2. `npm run kampagne` og `npm run ret` — dit eget abonnement.** Kører `claude -p` lokalt.
+```bash
+# i .env
+TILLAD_LOKAL_CLAUDE=true
+
+npm run dev:api
+```
+
+Så kalder appen `claude -p` på din maskine, og opslagene lander direkte i
+databasen. Knappen findes både under **Ny kampagne** og i **Ret kampagnen**.
+
+Gaten er bevidst ikke bygget på Netlifys egne variabler: flaget står kun i din
+lokale `.env`, som er gitignoreret og aldrig når Netlify. Et deploy kan derfor
+ikke starte processer, uanset hvad Netlify måtte sætte i fremtiden. Dertil
+nægter funktionen uanset flaget, hvis `NETLIFY=true`.
+
+Er flaget ikke sat — eller er du på det deployede site — svarer funktionen 501,
+og appen viser i stedet prompten til copy/paste. Ingen blindgyde.
+
+**2. Copy/paste i appen.** Byg prompten, kør den i Claude, indsæt JSON'en
+tilbage. Ingen opsætning, ingen udgift.
+
+**3. `npm run kampagne` og `npm run ret` — terminalen.** Kører `claude -p` lokalt.
 Claude Code bruger dit almindelige abonnements-login, så der er ingen API-nøgle
 og ingen regning per kampagne. Scriptet spørger om kunde, brief og periode,
 viser opslagene, og gemmer dem som kladder når du siger ja.
@@ -249,7 +308,7 @@ hverken læser OAuth-credentials eller nøgleringen og derfor ville kræve
 `ANTHROPIC_API_KEY`. Og det kan kun køre lokalt — den deployede app kan ikke
 låne dit abonnement, for en server har ingen adgang til dit login.
 
-**3. `netlify/functions/generer-kampagne.js` — API-nøgle.** Ligger klar. Sæt
+**4. `netlify/functions/generer-kampagne.js` — API-nøgle.** Ligger klar. Sæt
 `ANTHROPIC_API_KEY` i Netlify og kald `kaldApi("generer-kampagne", …)` fra
 `NyKampagne` i stedet for indsæt-feltet. Cirka 0,20 kr per kampagne med fem
 opslag. Det er den vej der skal bruges når appen skal køre uden dig.

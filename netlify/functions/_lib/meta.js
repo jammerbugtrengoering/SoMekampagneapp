@@ -177,6 +177,20 @@ const UDGIVERE = {
   },
 }
 
+/**
+ * Hvilket token gælder for en kanal?
+ *
+ * Kanalens eget vinder; ellers låner den kundens. Et Meta-systemtoken hører
+ * til en Business-portefølje og dækker de sider det er tildelt — så ét token
+ * kan betjene alle en kundes sider, og skal kun roteres ét sted.
+ *
+ * Reglen står også som view'et kanal_med_token i migration 0004, så appen og
+ * funktionerne svarer ens.
+ */
+export function gaeldendeToken(kanal) {
+  return kanal?.token_ciphertext ?? kanal?.brands?.customers?.token_ciphertext ?? null
+}
+
 /** Tekst + hashtags samlet til det der faktisk står i opslaget. */
 export function tekstMedTags(opslag) {
   const tags = (opslag.hashtags ?? []).map((t) => (t.startsWith('#') ? t : `#${t}`))
@@ -199,7 +213,9 @@ export async function publicerTilKanal(kanal, opslag) {
   }
 
   if (!kanal.active) return { ...grund, fejl: 'Kanalen er slået fra.' }
-  if (!kanal.token_ciphertext) return { ...grund, fejl: 'Kanalen har intet token.' }
+  if (!kanal.token_ciphertext) {
+    return { ...grund, fejl: 'Hverken kanalen eller kunden har et token.' }
+  }
 
   let token
   try {
@@ -255,9 +271,11 @@ export async function publicerOpslag(klient, opslagId) {
 
   if (error || !opslag) throw new Error(`Opslag ${opslagId} findes ikke.`)
 
+  // Kundens token hentes med, så en kanal uden eget token kan låne det.
+  // Ét systemtoken dækker typisk alle sider i samme Business-portefølje.
   const { data: maal } = await klient
     .from('post_targets')
-    .select('*, channels(*)')
+    .select('*, channels(*, brands(customers(token_ciphertext)))')
     .eq('post_id', opslagId)
     .in('status', ['pending', 'failed'])
 
@@ -277,7 +295,7 @@ export async function publicerOpslag(klient, opslagId) {
   const resultater = []
 
   for (const m of maal) {
-    const kanal = m.channels
+    const kanal = m.channels ? { ...m.channels, token_ciphertext: gaeldendeToken(m.channels) } : null
     if (!kanal) continue
 
     if (!tørt) {

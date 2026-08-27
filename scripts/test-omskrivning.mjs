@@ -142,5 +142,84 @@ test("uden tidspunkt giver null i stedet for at kaste", () => {
   assert.equal(flytDage(null, 7), null);
 });
 
+console.log("\nToken arves fra kunden");
+
+const { gaeldendeToken } = await import("../netlify/functions/_lib/meta.js");
+
+test("kanalens eget token vinder", () => {
+  assert.equal(
+    gaeldendeToken({ token_ciphertext: "eget", brands: { customers: { token_ciphertext: "kundens" } } }),
+    "eget",
+  );
+});
+
+test("uden eget token arves kundens", () => {
+  assert.equal(
+    gaeldendeToken({ token_ciphertext: null, brands: { customers: { token_ciphertext: "kundens" } } }),
+    "kundens",
+  );
+});
+
+test("hverken kanal eller kunde giver null", () => {
+  assert.equal(gaeldendeToken({ token_ciphertext: null, brands: { customers: {} } }), null);
+  assert.equal(gaeldendeToken({ token_ciphertext: null, brands: null }), null);
+  assert.equal(gaeldendeToken(null), null);
+});
+
+console.log("\nKundens forbehold kommer med i prompten");
+
+test("kundens og brandets maa-ikke-lister lægges sammen", () => {
+  const p = byggOmskrivPrompt({
+    brand: {
+      name: "Hundevask", guardrails: "ingen priser",
+      customers: { name: "Jammerbugt Rengøring", guardrails: "samtykke til medarbejderbilleder",
+                   samtykke: "Kun med skriftlig accept" },
+    },
+    kampagne: { name: "K" }, instruks: "kortere",
+    opslag: [{ tekst: "x", hashtags: [], scheduled_at: null, maal: [] }],
+  });
+
+  assert.match(p, /Del af: Jammerbugt Rengøring/);
+  assert.match(p, /samtykke til medarbejderbilleder/, "kundens forbehold skal med");
+  assert.match(p, /ingen priser/, "brandets forbehold skal med");
+  assert.match(p, /Kun med skriftlig accept/, "samtykketeksten skal med");
+});
+
+test("uden kunde ser briefingen ud som før", () => {
+  const p = byggOmskrivPrompt({
+    brand: { name: "Solo", guardrails: "ingen priser" },
+    kampagne: { name: "K" }, instruks: "kortere",
+    opslag: [{ tekst: "x", hashtags: [], scheduled_at: null, maal: [] }],
+  });
+  assert.ok(!p.includes("Del af:"));
+  assert.match(p, /ingen priser/);
+});
+
+console.log("\nGaten for lokal Claude");
+
+const { maaKoereLokalt } = await import("../netlify/functions/claude-lokal.js");
+
+test("i skyen nægtes den, også med flaget sat", () => {
+  const svar = maaKoereLokalt({ NETLIFY: "true", TILLAD_LOKAL_CLAUDE: "true" });
+  assert.ok(svar, "skulle nægte");
+  assert.match(svar, /egen maskine/);
+});
+
+test("lokalt uden flaget nægtes den", () => {
+  const svar = maaKoereLokalt({});
+  assert.ok(svar);
+  assert.match(svar, /TILLAD_LOKAL_CLAUDE/);
+});
+
+test("flaget skal være præcis \"true\"", () => {
+  assert.ok(maaKoereLokalt({ TILLAD_LOKAL_CLAUDE: "1" }), "\"1\" er ikke nok");
+  assert.ok(maaKoereLokalt({ TILLAD_LOKAL_CLAUDE: "" }), "tom er ikke nok");
+  assert.ok(maaKoereLokalt({ TILLAD_LOKAL_CLAUDE: "True" }), "stort T er ikke nok");
+});
+
+test("lokalt med flaget sat slippes igennem", () => {
+  assert.equal(maaKoereLokalt({ TILLAD_LOKAL_CLAUDE: "true" }), null);
+});
+
 console.log(fejlede === 0 ? "\nAlle tests bestået.\n" : `\n${fejlede} test(s) fejlede.\n`);
 process.exit(fejlede === 0 ? 0 : 1);

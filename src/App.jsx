@@ -290,6 +290,7 @@ function Kampagneapp({ session, onLogUd }) {
   const [valgtKampagne, setValgtKampagne] = useState(null);
   const [valgtKunde, setValgtKunde] = useState(null);
 
+  const [kunder, setKunder] = useState([]);
   const [brands, setBrands] = useState([]);
   const [kanaler, setKanaler] = useState([]);
   const [kampagner, setKampagner] = useState([]);
@@ -321,8 +322,9 @@ function Kampagneapp({ session, onLogUd }) {
   const hentAlt = useCallback(async () => {
     setHenter(true);
 
-    const [b, k, c, p] = await Promise.all([
-      supabase.from("brands").select("*").order("name"),
+    const [ku, b, k, c, p] = await Promise.all([
+      supabase.from("customers").select("*").order("name"),
+      supabase.from("brands").select("*, customers(*)").order("name"),
       supabase.from("channels").select("*").order("platform"),
       supabase.from("campaigns").select("*").order("created_at", { ascending: false }),
       supabase
@@ -331,6 +333,7 @@ function Kampagneapp({ session, onLogUd }) {
         .order("scheduled_at", { ascending: true }),
     ]);
 
+    setKunder(ku.data ?? []);
     setBrands(b.data ?? []);
     setKanaler(k.data ?? []);
     setKampagner(c.data ?? []);
@@ -386,7 +389,9 @@ function Kampagneapp({ session, onLogUd }) {
           <div style={styles.brandMark}>SK</div>
           <div>
             <div style={styles.brandTitle}>Kampagner</div>
-            <div style={styles.brandSub}>{brands.length} kunder · {opslag.length} opslag</div>
+            <div style={styles.brandSub}>
+              {kunder.length} kunder · {brands.length} brands · {opslag.length} opslag
+            </div>
           </div>
         </div>
 
@@ -451,8 +456,8 @@ function Kampagneapp({ session, onLogUd }) {
           />
         ) : (
           <Kunder
-            brands={brands} kanalerFor={kanalerFor}
-            valgt={valgtKunde ?? brands[0]?.id} setValgt={setValgtKunde}
+            kunder={kunder} brands={brands} kanalerFor={kanalerFor}
+            valgt={valgtKunde ?? kunder[0]?.id} setValgt={setValgtKunde}
             visToast={visToast} genindlaes={hentAlt}
           />
         )}
@@ -648,12 +653,33 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
     }
   }
 
-  async function opret() {
+  /**
+   * Kalder Claude på din egen maskine, så du slipper for copy/paste.
+   * Virker kun under `npm run dev:api` — deployet svarer 501, og så står
+   * copy/paste-vejen stadig åben nedenunder.
+   */
+  async function koerLokalt() {
+    setFejl("");
+    if (!navn.trim() || !brief.trim()) { setFejl("Udfyld navn og brief."); return; }
+    if (!valgte.length) { setFejl("Vælg mindst én kanal."); return; }
+
+    setVenter(true);
+    const res = await kaldApi("claude-lokal", {
+      handling: "generer", brand, navn, brief, maal,
+      antal, kanaler: valgte, start, slut,
+    });
+    setVenter(false);
+
+    if (!res.ok) { setFejl(res.fejl); byg(); return; }
+    await opret(res.resultat);
+  }
+
+  async function opret(kilde) {
     setFejl("");
 
     let opslag;
     try {
-      opslag = laesOpslag(svar, valgte);
+      opslag = laesOpslag(kilde ?? svar, valgte);
     } catch (e) {
       setFejl(e.message);
       return;
@@ -771,9 +797,14 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
             </Felt>
           </div>
 
-          <button style={styles.primaryBtn} onClick={byg}>
-            <Sparkles size={15} /> Byg prompt
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button style={styles.primaryBtn} disabled={venter} onClick={koerLokalt}>
+              {venter ? <><Loader2 size={15} /> Claude skriver…</> : <><Sparkles size={15} /> Kør i Claude</>}
+            </button>
+            <button style={styles.secondaryBtn} onClick={byg}>
+              Byg prompt til copy/paste
+            </button>
+          </div>
 
           {brand && (
             <dl style={styles.definitioner}>
@@ -813,7 +844,7 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
                   fontFamily: "ui-monospace, Menlo, monospace" }} />
 
               <button style={{ ...styles.primaryBtn, marginTop: 10 }}
-                disabled={venter || !svar.trim()} onClick={opret}>
+                disabled={venter || !svar.trim()} onClick={() => opret()}>
                 {venter ? <><Loader2 size={15} /> Opretter…</> : "Opret opslag"}
               </button>
               <p style={styles.dæmpetLille}>
@@ -1235,11 +1266,44 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
     setKopieret(false);
   }
 
-  async function anvendOmskrivning() {
+  /** Claude på din egen maskine. Kun under `npm run dev:api`. */
+  async function koerLokalt(handling) {
+    setFejl("");
+
+    const krop = handling === "omskriv"
+      ? {
+          handling, brand, kampagne, instruks: instruks.trim(),
+          opslag: beroerte.map((o) => ({ ...o, tekst: o.body })),
+        }
+      : {
+          handling: "generer", brand, navn: navn.trim(), brief: nyBrief.trim(),
+          maal: maal.trim(), antal, kanaler: platforme,
+          start: start || kampagne.starts_on, slut,
+        };
+
+    if (handling === "omskriv" && !instruks.trim()) return setFejl("Skriv hvad der skal rettes.");
+    if (handling !== "omskriv" && !nyBrief.trim()) return setFejl("Skriv den nye brief.");
+    if (!beroerte.length) return setFejl("Ingen opslag at rette.");
+
+    setVenter(true);
+    const res = await kaldApi("claude-lokal", krop);
+    setVenter(false);
+
+    if (!res.ok) {
+      setFejl(res.fejl);
+      if (handling === "omskriv") byggOmskriv(); else byggNy();
+      return;
+    }
+
+    if (handling === "omskriv") await anvendOmskrivning(res.resultat);
+    else await anvendNy(res.resultat);
+  }
+
+  async function anvendOmskrivning(kilde) {
     setFejl("");
     let rettelser;
     try {
-      rettelser = laesOmskrivning(svar, beroerte.length);
+      rettelser = laesOmskrivning(kilde ?? svar, beroerte.length);
     } catch (e) {
       return setFejl(e.message);
     }
@@ -1283,11 +1347,11 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
     setKopieret(false);
   }
 
-  async function anvendNy() {
+  async function anvendNy(kilde) {
     setFejl("");
     let nye;
     try {
-      nye = laesOpslag(svar, platforme);
+      nye = laesOpslag(kilde ?? svar, platforme);
     } catch (e) {
       return setFejl(e.message);
     }
@@ -1469,9 +1533,16 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
                       <textarea style={{ ...styles.input, minHeight: 100, fontFamily: "inherit" }}
                         value={instruks} onChange={(e) => setInstruks(e.target.value)} />
                     </Felt>
-                    <button style={styles.secondaryBtn} onClick={byggOmskriv}>
-                      <Sparkles size={15} /> Byg prompt
-                    </button>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <button style={styles.primaryBtn} disabled={venter}
+                        onClick={() => koerLokalt("omskriv")}>
+                        {venter ? <><Loader2 size={15} /> Claude retter…</>
+                          : <><Sparkles size={15} /> Kør i Claude</>}
+                      </button>
+                      <button style={styles.secondaryBtn} onClick={byggOmskriv}>
+                        Byg prompt
+                      </button>
+                    </div>
                   </>
                 ) : (
                   <>
@@ -1487,9 +1558,16 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
                       <input type="number" min={1} max={20} style={styles.input}
                         value={antal} onChange={(e) => setAntal(Number(e.target.value))} />
                     </Felt>
-                    <button style={styles.secondaryBtn} onClick={byggNy}>
-                      <Sparkles size={15} /> Byg prompt
-                    </button>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <button style={styles.primaryBtn} disabled={venter}
+                        onClick={() => koerLokalt("ny")}>
+                        {venter ? <><Loader2 size={15} /> Claude skriver…</>
+                          : <><Sparkles size={15} /> Kør i Claude</>}
+                      </button>
+                      <button style={styles.secondaryBtn} onClick={byggNy}>
+                        Byg prompt
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
@@ -1519,7 +1597,7 @@ function RetKampagne({ kampagne, liste, brand, kanaler, visToast, genindlaes, on
 
                     <button style={{ ...styles.primaryBtn, marginTop: 10 }}
                       disabled={venter || !svar.trim()}
-                      onClick={tilstand === "omskriv" ? anvendOmskrivning : anvendNy}>
+                      onClick={() => (tilstand === "omskriv" ? anvendOmskrivning() : anvendNy())}>
                       {venter ? <><Loader2 size={15} /> Retter…</>
                         : tilstand === "omskriv" ? "Anvend rettelserne"
                         : `Erstat ${beroerte.length} opslag`}
@@ -1754,8 +1832,14 @@ function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
 
   const hentArkiv = useCallback(async () => {
     setHenter(true);
+    // Brandets egne billeder OG kundens fælles arkiv. Firmabiler og
+    // medarbejdere passer til flere af kundens brands.
+    const filter = brand.customer_id
+      ? `brand_id.eq.${brand.id},customer_id.eq.${brand.customer_id}`
+      : `brand_id.eq.${brand.id}`;
+
     const { data } = await supabase
-      .from("assets").select("*").eq("brand_id", brand.id)
+      .from("assets").select("*").or(filter)
       .order("created_at", { ascending: false }).limit(60);
     setArkiv(data ?? []);
     setHenter(false);
@@ -2061,62 +2145,441 @@ function AiFane({ venter, onBillede, onFejl }) {
    Kunder
    ===================================================================== */
 
-function Kunder({ brands, kanalerFor, valgt, setValgt, visToast, genindlaes }) {
-  const brand = brands.find((b) => b.id === valgt) ?? brands[0];
-  const [nyKanal, setNyKanal] = useState(false);
+function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindlaes }) {
+  const [fane, setFane] = useState("stamkort");
+  const [nytBrand, setNytBrand] = useState(false);
+  const [nyKunde, setNyKunde] = useState(false);
 
-  if (!brand) return <p style={styles.dæmpet}>Ingen kunder endnu.</p>;
+  const kunde = kunder.find((k) => k.id === valgt) ?? kunder[0];
+  const kundensBrands = kunde ? brands.filter((b) => b.customer_id === kunde.id) : [];
+
+  if (!kunder.length && !nyKunde) {
+    return (
+      <>
+        <h1 style={styles.h1}>Kunder</h1>
+        <p style={styles.dæmpet}>
+          Ingen kunder endnu. Kør <code>npm run db:setup</code>, eller opret en her.
+        </p>
+        <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={() => setNyKunde(true)}>
+          <Plus size={15} /> Ny kunde
+        </button>
+      </>
+    );
+  }
 
   return (
     <>
       <div style={styles.toolbar}>
-        {brands.map((b) => (
-          <button key={b.id}
-            style={b.id === brand.id ? styles.primaryBtn : styles.secondaryBtn}
-            onClick={() => { setValgt(b.id); setNyKanal(false); }}>
-            <i style={{ width: 9, height: 9, borderRadius: 2, background: b.colors?.primary ?? "#64748B", display: "block" }} />
-            {b.name}
+        {kunder.map((k) => (
+          <button key={k.id}
+            style={k.id === kunde?.id ? styles.primaryBtn : styles.secondaryBtn}
+            onClick={() => { setValgt(k.id); setNytBrand(false); setNyKunde(false); }}>
+            {k.name}
           </button>
         ))}
+        <div style={{ flex: 1 }} />
+        <button style={styles.secondaryBtn} onClick={() => setNyKunde(true)}>
+          <Plus size={15} /> Ny kunde
+        </button>
       </div>
 
-      <h1 style={styles.h1}>{brand.name}</h1>
-      <p style={styles.dæmpet}>
-        {brand.kind === "association" ? "Forening" : "Virksomhed"} ·{" "}
-        {kanalerFor(brand.id).filter((k) => k.active).length} aktive kanaler
-      </p>
+      {nyKunde && (
+        <Stamkort key="ny" kunde={null} visToast={visToast}
+          genindlaes={async () => { setNyKunde(false); await genindlaes(); }}
+          onAnnuller={() => setNyKunde(false)} />
+      )}
 
-      <div style={{ ...styles.toKolonner, marginTop: 16 }}>
-        <Brandprofil key={brand.id} brand={brand} visToast={visToast} genindlaes={genindlaes} />
+      {!nyKunde && kunde && (
+        <>
+          <h1 style={styles.h1}>{kunde.name}</h1>
+          <p style={styles.dæmpet}>
+            {kundensBrands.length} brand{kundensBrands.length === 1 ? "" : "s"}
+            {" · "}
+            {kundensBrands.reduce((n, b) => n + kanalerFor(b.id).filter((k) => k.active).length, 0)}
+            {" aktive kanaler"}
+            {kunde.token_ciphertext
+              ? kunde.token_fejl
+                ? " · token fejler"
+                : kunde.token_testet_at ? " · token bekræftet" : " · token gemt, ikke testet"
+              : " · intet token"}
+          </p>
 
-        <div>
-          <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-            <h2 style={{ ...styles.h2, margin: 0 }}>Kanaler</h2>
-            <div style={{ flex: 1 }} />
-            {!nyKanal && (
-              <button style={styles.secondaryBtn} onClick={() => setNyKanal(true)}>
-                <Plus size={14} /> Tilføj
-              </button>
-            )}
+          <div style={{ ...styles.faner, marginTop: 14 }}>
+            {[["stamkort", "Stamkort"], ["brands", `Brands og kanaler (${kundensBrands.length})`]]
+              .map(([id, mrk]) => (
+                <button key={id} style={fane === id ? styles.faneAktiv : styles.fane}
+                  onClick={() => setFane(id)}>
+                  {mrk}
+                </button>
+              ))}
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {kanalerFor(brand.id).map((k) => (
-              <KanalKort key={k.id} kanal={k} brandId={brand.id} visToast={visToast} genindlaes={genindlaes} />
-            ))}
-            {nyKanal && (
-              <KanalKort brandId={brand.id} visToast={visToast}
-                genindlaes={async () => { setNyKanal(false); await genindlaes(); }} />
-            )}
-            {!kanalerFor(brand.id).length && !nyKanal && (
-              <p style={styles.dæmpet}>
-                Ingen kanaler. Uden en kanal kan kampagnen genereres, men ikke publiceres.
-              </p>
+          <div style={{ marginTop: 18 }}>
+            {fane === "stamkort" ? (
+              <Stamkort key={kunde.id} kunde={kunde} visToast={visToast} genindlaes={genindlaes} />
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+                  <p style={{ ...styles.dæmpet, margin: 0 }}>
+                    Hvert brand har sin egen stemme og sine egne kanaler. Tonen for hundevask
+                    er ikke tonen for erhvervsrengøring.
+                  </p>
+                  <div style={{ flex: 1 }} />
+                  {!nytBrand && (
+                    <button style={styles.secondaryBtn} onClick={() => setNytBrand(true)}>
+                      <Plus size={15} /> Nyt brand
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {kundensBrands.map((b) => (
+                    <BrandBlok key={b.id} brand={b} kunde={kunde} kunder={kunder}
+                      kanaler={kanalerFor(b.id)} visToast={visToast} genindlaes={genindlaes} />
+                  ))}
+
+                  {nytBrand && (
+                    <NytBrand kunde={kunde} visToast={visToast}
+                      genindlaes={async () => { setNytBrand(false); await genindlaes(); }}
+                      onAnnuller={() => setNytBrand(false)} />
+                  )}
+
+                  {!kundensBrands.length && !nytBrand && (
+                    <p style={styles.dæmpet}>
+                      Ingen brands endnu. Et brand er et forretningsområde — fx rengøring,
+                      hundevask eller vaskeri.
+                    </p>
+                  )}
+                </div>
+              </>
             )}
           </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   Stamkortet: aftalen, Meta-opsætningen og de forbehold der gælder hele
+   kunden. Tokenet ligger her, fordi ét Meta-systemtoken dækker alle sider
+   i samme Business-portefølje.
+   --------------------------------------------------------------------- */
+
+function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
+  const tom = {
+    name: "", kontakt_navn: "", kontakt_mail: "", kontakt_telefon: "",
+    aftale: "", godkender: "", meta_portefoelje_id: "", meta_systembruger: "",
+    token_label: "", samtykke: "", guardrails: "", noter: "",
+  };
+  const [felter, setFelter] = useState(() =>
+    Object.fromEntries(Object.keys(tom).map((n) => [n, kunde?.[n] ?? ""])),
+  );
+  const [token, setToken] = useState("");
+  const [venter, setVenter] = useState("");
+  const [testsvar, setTestsvar] = useState(null);
+
+  const saet = (n) => (e) => setFelter((f) => ({ ...f, [n]: e.target.value }));
+
+  async function gem() {
+    setVenter("gem");
+    const svar = await kaldApi("gem-kunde", { kundeId: kunde?.id, ...felter, token });
+    setVenter("");
+    if (!svar.ok) return visToast(svar.fejl, false);
+    visToast(svar.besked);
+    setToken("");
+    await genindlaes();
+  }
+
+  async function test() {
+    setVenter("test");
+    setTestsvar(null);
+    const svar = await kaldApi("gem-kunde", { handling: "test", kundeId: kunde.id });
+    setVenter("");
+    setTestsvar(svar);
+    visToast(svar.ok ? svar.besked : (svar.besked ?? svar.fejl), svar.ok);
+    await genindlaes();
+  }
+
+  return (
+    <div style={styles.toKolonner}>
+      <div style={styles.kort}>
+        <h2 style={styles.h2}>{kunde ? "Aftalen" : "Ny kunde"}</h2>
+
+        <div style={{ marginTop: 12 }}>
+          <Felt mrk="Navn">
+            <input style={styles.input} value={felter.name} onChange={saet("name")}
+              placeholder="fx Jammerbugt Rengøring" />
+          </Felt>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Felt mrk="Kontaktperson" bredde={200}>
+              <input style={styles.input} value={felter.kontakt_navn} onChange={saet("kontakt_navn")} />
+            </Felt>
+            <Felt mrk="Telefon" bredde={150}>
+              <input style={styles.input} value={felter.kontakt_telefon} onChange={saet("kontakt_telefon")} />
+            </Felt>
+          </div>
+          <Felt mrk="E-mail">
+            <input style={styles.input} value={felter.kontakt_mail} onChange={saet("kontakt_mail")} />
+          </Felt>
+          <Felt mrk="Hvad er aftalt" hjaelp="fx «4 opslag om måneden fordelt på de tre sider»">
+            <textarea style={{ ...styles.input, minHeight: 70, fontFamily: "inherit" }}
+              value={felter.aftale} onChange={saet("aftale")} />
+          </Felt>
+          <Felt mrk="Hvem godkender hos kunden">
+            <input style={styles.input} value={felter.godkender} onChange={saet("godkender")} />
+          </Felt>
+          <Felt mrk="Noter">
+            <textarea style={{ ...styles.input, minHeight: 60, fontFamily: "inherit" }}
+              value={felter.noter} onChange={saet("noter")} />
+          </Felt>
+        </div>
+
+        <h2 style={{ ...styles.h2, marginTop: 20 }}>Gælder alle kundens brands</h2>
+        <p style={styles.dæmpetLille}>
+          Lægges oven i det enkelte brands egen må-ikke-liste, så en fælles regel
+          kun skrives ét sted.
+        </p>
+        <Felt mrk="Samtykke og billeder">
+          <textarea style={{ ...styles.input, minHeight: 70, fontFamily: "inherit" }}
+            value={felter.samtykke} onChange={saet("samtykke")}
+            placeholder="fx Billeder af medarbejdere kræver skriftlig accept. Ingen børn uden forældresamtykke." />
+        </Felt>
+        <Felt mrk="Må ikke — for hele kunden">
+          <textarea style={{ ...styles.input, minHeight: 70, fontFamily: "inherit",
+            borderLeft: "2px solid #B91C1C" }}
+            value={felter.guardrails} onChange={saet("guardrails")} />
+        </Felt>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button style={styles.primaryBtn} disabled={venter === "gem"} onClick={gem}>
+            {venter === "gem" ? "Gemmer…" : kunde ? "Gem" : "Opret kunde"}
+          </button>
+          {onAnnuller && (
+            <button style={styles.secondaryBtn} onClick={onAnnuller}>Annuller</button>
+          )}
         </div>
       </div>
-    </>
+
+      <div style={styles.kort}>
+        <h2 style={styles.h2}>Meta-opsætning</h2>
+        <p style={styles.dæmpetLille}>
+          Ét systemtoken dækker alle sider der er tildelt systembrugeren i porteføljen.
+          Det ligger her, så det kun skal roteres ét sted.
+        </p>
+
+        {!kunde ? (
+          <p style={{ ...styles.dæmpet, marginTop: 14 }}>
+            Opret kunden først — så kan tokenet gemmes og testes.
+          </p>
+        ) : (
+          <div style={{ marginTop: 14 }}>
+            <Felt mrk="Business-portefølje-id">
+              <input style={styles.input} value={felter.meta_portefoelje_id}
+                onChange={saet("meta_portefoelje_id")} />
+            </Felt>
+            <Felt mrk="Systembruger">
+              <input style={styles.input} value={felter.meta_systembruger}
+                onChange={saet("meta_systembruger")} />
+            </Felt>
+            <Felt mrk="Systemtoken"
+              hjaelp={kunde.token_ciphertext
+                ? "Et token er gemt og krypteret. Lad feltet stå tomt for at beholde det."
+                : "Fra Meta Business Suite → Systembrugere → Generér token."}>
+              <input type="password" autoComplete="off" style={styles.input}
+                placeholder={kunde.token_ciphertext ? "••••••••" : "EAAG…"}
+                value={token} onChange={(e) => setToken(e.target.value)} />
+              <input style={{ ...styles.input, marginTop: 8 }} value={felter.token_label}
+                onChange={saet("token_label")} placeholder="Label, fx «system user 2026-08»" />
+            </Felt>
+
+            {kunde.token_fejl && <p style={styles.fejlBoks}>{kunde.token_fejl}</p>}
+            {kunde.token_testet_at && !kunde.token_fejl && (
+              <p style={styles.okBoks}>
+                Testet {new Date(kunde.token_testet_at).toLocaleString("da-DK")}
+              </p>
+            )}
+            {kunde.token_ciphertext && !kunde.token_testet_at && !kunde.token_fejl && (
+              <p style={styles.advarselBoks}>Gemt, men aldrig testet.</p>
+            )}
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              <button style={styles.primaryBtn} disabled={!!venter} onClick={gem}>
+                {venter === "gem" ? "Gemmer…" : "Gem"}
+              </button>
+              <button style={styles.secondaryBtn}
+                disabled={!!venter || !kunde.token_ciphertext} onClick={test}>
+                {venter === "test" ? <><Loader2 size={14} /> Tester…</> : "Test alle kanaler"}
+              </button>
+            </div>
+
+            {testsvar?.resultater && (
+              <div style={{ marginTop: 14 }}>
+                <div style={styles.dt}>Resultat per kanal</div>
+                {testsvar.resultater.map((r, i) => (
+                  <p key={i} style={{ margin: "6px 0 0", fontSize: 13 }}>
+                    <span style={{ ...styles.mærkat,
+                      background: r.ok ? "#D1FAE5" : "#FEE2E2",
+                      color: r.ok ? "#065F46" : "#991B1B", marginRight: 7 }}>
+                      {r.ok ? "ok" : "fejl"}
+                    </span>
+                    {r.kanal} <span style={styles.dæmpetLille}>({r.kilde})</span>
+                    <br />
+                    <span style={styles.dæmpetLille}>{r.besked}</span>
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   Ét brand med sine kanaler
+   --------------------------------------------------------------------- */
+
+function BrandBlok({ brand, kunde, kunder, kanaler, visToast, genindlaes }) {
+  const [aaben, setAaben] = useState(false);
+  const [nyKanal, setNyKanal] = useState(false);
+  const [flytter, setFlytter] = useState(false);
+
+  /**
+   * Migrationen gav hvert eksisterende brand sin egen kunde, fordi den ikke
+   * kan gætte hvilke der hører sammen. Her samler du dem — fx rengøring,
+   * hundevask og vaskeri under Jammerbugt Rengøring.
+   *
+   * Kanaler og opslag følger med af sig selv: de hænger på brandet, ikke på
+   * kunden. Det eneste der skifter, er hvilket token og hvilke fælles
+   * forbehold brandet arver.
+   */
+  async function flytTil(kundeId) {
+    if (!kundeId || kundeId === brand.customer_id) return;
+    setFlytter(true);
+    const { error } = await supabase
+      .from("brands").update({ customer_id: kundeId }).eq("id", brand.id);
+    setFlytter(false);
+
+    if (error) return visToast(error.message, false);
+    const nyKunde = kunder.find((k) => k.id === kundeId);
+    visToast(`${brand.name} hører nu under ${nyKunde?.name ?? "den nye kunde"}.`);
+    await genindlaes();
+  }
+
+  const aktive = kanaler.filter((k) => k.active);
+  const udenToken = aktive.filter((k) => !k.token_ciphertext && !kunde?.token_ciphertext);
+
+  return (
+    <div style={styles.kort}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ width: 12, height: 12, borderRadius: 3,
+          background: brand.colors?.primary ?? "#64748B", display: "block" }} />
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>{brand.name}</div>
+          <div style={styles.dæmpetLille}>
+            {aktive.length} aktive kanaler
+            {aktive.length > 0 && ` · ${aktive.map((k) => PLATFORM[k.platform]).join(", ")}`}
+            {udenToken.length > 0 && ` · ${udenToken.length} uden token`}
+          </div>
+        </div>
+        <div style={{ flex: 1 }} />
+        {kunder?.length > 1 && (
+          <select style={{ ...styles.input, width: "auto", fontSize: 12.5, padding: "5px 8px" }}
+            value={brand.customer_id ?? ""} disabled={flytter}
+            onChange={(e) => flytTil(e.target.value)}
+            title="Flyt brandet til en anden kunde">
+            {kunder.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
+          </select>
+        )}
+        <button style={styles.linkBtnLille} onClick={() => setAaben(!aaben)}>
+          {aaben ? <><X size={13} /> Luk</> : "Åbn"}
+        </button>
+      </div>
+
+      {aaben && (
+        <div style={{ marginTop: 16 }}>
+          <div style={styles.toKolonner}>
+            <Brandprofil key={brand.id} brand={brand} visToast={visToast} genindlaes={genindlaes} />
+
+            <div>
+              <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+                <h2 style={{ ...styles.h2, margin: 0 }}>Kanaler</h2>
+                <div style={{ flex: 1 }} />
+                {!nyKanal && (
+                  <button style={styles.secondaryBtn} onClick={() => setNyKanal(true)}>
+                    <Plus size={14} /> Tilføj
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {kanaler.map((k) => (
+                  <KanalKort key={k.id} kanal={k} brandId={brand.id} kunde={kunde}
+                    visToast={visToast} genindlaes={genindlaes} />
+                ))}
+                {nyKanal && (
+                  <KanalKort brandId={brand.id} kunde={kunde} visToast={visToast}
+                    genindlaes={async () => { setNyKanal(false); await genindlaes(); }} />
+                )}
+                {!kanaler.length && !nyKanal && (
+                  <p style={styles.dæmpet}>
+                    Ingen kanaler. Uden en kanal kan kampagnen genereres, men ikke publiceres.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NytBrand({ kunde, visToast, genindlaes, onAnnuller }) {
+  const [navn, setNavn] = useState("");
+  const [farve, setFarve] = useState("#2F5DE0");
+  const [venter, setVenter] = useState(false);
+
+  async function opret() {
+    if (!navn.trim()) return visToast("Brandet skal have et navn.", false);
+    setVenter(true);
+
+    const slug = `${kunde.slug}-${navn.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+      .replace(/^-|-$/g, "");
+
+    const { error } = await supabase.from("brands").insert({
+      customer_id: kunde.id, name: navn.trim(), slug,
+      colors: { primary: farve },
+    });
+    setVenter(false);
+
+    if (error) return visToast(error.message, false);
+    visToast(`${navn} oprettet. Udfyld tone og målgruppe, så Claude har noget at gå efter.`);
+    await genindlaes();
+  }
+
+  return (
+    <div style={styles.kort}>
+      <h2 style={styles.h2}>Nyt brand under {kunde.name}</h2>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+        <Felt mrk="Navn" bredde={240}>
+          <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)}
+            placeholder="fx Hundevask" />
+        </Felt>
+        <Felt mrk="Farve" bredde={110}>
+          <input type="color" style={{ ...styles.input, height: 40, padding: 4 }}
+            value={farve} onChange={(e) => setFarve(e.target.value)} />
+        </Felt>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={styles.primaryBtn} disabled={venter} onClick={opret}>
+          {venter ? "Opretter…" : "Opret brand"}
+        </button>
+        <button style={styles.secondaryBtn} onClick={onAnnuller}>Annuller</button>
+      </div>
+    </div>
   );
 }
 
@@ -2190,7 +2653,7 @@ function Brandprofil({ brand, visToast, genindlaes }) {
   );
 }
 
-function KanalKort({ kanal, brandId, visToast, genindlaes }) {
+function KanalKort({ kanal, brandId, kunde, visToast, genindlaes }) {
   const [platform, setPlatform] = useState(kanal?.platform ?? "facebook");
   const [visningsnavn, setVisningsnavn] = useState(kanal?.display_name ?? "");
   const [pageId, setPageId] = useState(kanal?.page_id ?? "");
@@ -2248,11 +2711,14 @@ function KanalKort({ kanal, brandId, visToast, genindlaes }) {
       <Felt
         mrk="Access token"
         hjaelp={kanal?.token_ciphertext
-          ? "Et token er gemt og krypteret. Lad feltet stå tomt for at beholde det."
-          : "Systembruger-token fra Meta Business Suite. Krypteres inden det gemmes."}
+          ? "Kanalen har sit eget token, som vinder over kundens."
+          : kunde?.token_ciphertext
+            ? `Arver kundens token${kunde.token_label ? ` (${kunde.token_label})` : ""}. Udfyld kun her hvis siden ligger i en ANDEN Business-portefølje.`
+            : "Hverken kanalen eller kunden har et token. Læg det helst på kunden — ét token dækker hele porteføljen."}
       >
         <input type="password" autoComplete="off" style={styles.input}
-          placeholder={kanal?.token_ciphertext ? "••••••••" : "EAAG…"}
+          placeholder={kanal?.token_ciphertext ? "••••••••"
+            : kunde?.token_ciphertext ? "arver kundens" : "EAAG…"}
           value={token} onChange={(e) => setToken(e.target.value)} />
         <input style={{ ...styles.input, marginTop: 8 }} value={tokenLabel}
           onChange={(e) => setTokenLabel(e.target.value)}
