@@ -1924,9 +1924,24 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
 
   const [platform, setPlatform] = useState(platforme[0]);
 
+  // Foldet ud eller ej. Foldet sammen er sandheden: sådan møder folk opslaget
+  // i feedet. Udfoldet viser resten nedtonet, så man kan se præcis hvad der
+  // lå bagved — det er dét man skal bruge når man retter teksten.
+  const [udfoldet, setUdfoldet] = useState(false);
+
   useEffect(() => {
     if (!platforme.includes(platform)) setPlatform(platforme[0]);
   }, [platforme, platform]);
+
+  // Nyt opslag, ny kanal, ny skærmstørrelse: fold sammen igen, ellers ser man
+  // det næste opslag udfoldet og tror det ikke bliver klippet. Rettet under
+  // render frem for i en effect, så der ikke blinker et udfoldet opslag forbi.
+  const visningsnoegle = `${index}|${platform}|${visning}`;
+  const [sidsteNoegle, setSidsteNoegle] = useState(visningsnoegle);
+  if (sidsteNoegle !== visningsnoegle) {
+    setSidsteNoegle(visningsnoegle);
+    setUdfoldet(false);
+  }
 
   const gaa = useCallback(
     (retning) => setIndex((i) => Math.min(Math.max(i + retning, 0), liste.length - 1)),
@@ -2018,10 +2033,23 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
 
                 <p style={styles.feedTekst}>
                   {synlig}
-                  {klippet && (
+                  {klippet && !udfoldet && (
+                    <>
+                      {"… "}
+                      <button type="button" style={styles.feedSeMere}
+                        onClick={() => setUdfoldet(true)}>
+                        Se mere
+                      </button>
+                    </>
+                  )}
+                  {klippet && udfoldet && (
                     <>
                       <span style={styles.feedSkjult}>{skjult}</span>
-                      <span style={styles.feedSeMere}>… Se mere</span>
+                      {"  "}
+                      <button type="button" style={styles.feedSeMere}
+                        onClick={() => setUdfoldet(false)}>
+                        Vis mindre
+                      </button>
                     </>
                   )}
                 </p>
@@ -2044,7 +2072,9 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
 
               {klippet && (
                 <p style={styles.dæmpetLille}>
-                  Det nedtonede er skjult bag «Se mere» — {skjult.trim().length} tegn.
+                  {udfoldet
+                    ? `Det nedtonede så ingen uden at trykke — ${skjult.trim().length} tegn.`
+                    : `${skjult.trim().length} tegn ligger bag «Se mere». Tryk for at se dem.`}
                   {visning === "mobil"
                     ? ` Mobil klipper ved ${graense} tegn.`
                     : ` Computer klipper ved ${graense} tegn.`}
@@ -3324,7 +3354,10 @@ const styles = {
   // Det skjulte vises nedtonet frem for at være væk — så kan man se hvad
   // der forsvinder bag «Se mere», i stedet for at gætte.
   feedSkjult: { color: "#B6BEC9" },
-  feedSeMere: { color: "#64748B", fontWeight: 600 },
+  // Ser ud som Facebooks egen «Se mere», men er en rigtig knap — så den også
+  // kan nås med tastaturet.
+  feedSeMere: { color: "#64748B", border: "none", background: "none",
+    padding: 0, font: "inherit", fontWeight: 600, cursor: "pointer" },
   feedBillede: { width: "100%", display: "block", maxHeight: 420, objectFit: "cover" },
   feedBilledeFoerst: { width: "100%", display: "block", aspectRatio: "1 / 1", objectFit: "cover" },
   feedUdenBillede: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
