@@ -9,7 +9,42 @@
    Ren JavaScript uden browser-API'er, så Node kan importere den direkte.
    ===================================================================== */
 
+import { REGLER } from "./kanalregler.js";
+
 export const KANALER = ["facebook", "instagram", "linkedin"];
+
+/**
+ * Fortæller modellen hvor teksten bliver klippet i feedet.
+ *
+ * Uden det her skriver den som om hele opslaget bliver læst: stemning
+ * først, pointe til sidst. Det er god tekst i et dokument og dårlig tekst i
+ * et feed, hvor mobilen folder alt efter 175 tegn på Facebook og 125 på
+ * Instagram. Forhåndsvisningen har fanget det bagefter og bedt dig rette i
+ * hånden hver gang — det er en regel modellen selv skal kende.
+ *
+ * Tallene hentes fra kanalregler.js, så de kun står ét sted. Flytter
+ * Facebook grænsen, flytter både advarslen og prompten sig med.
+ */
+function klipRegler(kanaler) {
+  const linjer = (kanaler ?? [])
+    .map((k) => REGLER[k])
+    .filter(Boolean)
+    .map((r) => `- ${r.navn}: de første ${r.klipMobil} tegn vises på mobil. Resten ligger bag «Se mere».`);
+
+  if (!linjer.length) return "";
+
+  const mindst = Math.min(
+    ...(kanaler ?? []).map((k) => REGLER[k]?.klipMobil).filter(Boolean),
+  );
+
+  return `SÅDAN BLIVER TEKSTEN KLIPPET — skriv efter det:
+${linjer.join("\n")}
+
+- Opfordringen til handling skal stå INDEN klippet. Skriv, ring, book, tilmeld,
+  telefonnummer, mailadresse: det hører til i de første ${mindst} tegn, ikke i sidste afsnit.
+- Første sætning skal kunne stå alene og gøre det værd at trykke «Se mere».
+- Det der står efter klippet, er uddybningen — ikke pointen.`;
+}
 
 /** JSON Schema til `claude -p --json-schema`. Samme form som vi selv validerer. */
 export const KAMPAGNE_SKEMA = {
@@ -81,6 +116,8 @@ Brief: ${brief}
 ${maal ? `Mål: ${maal}` : ""}
 Periode: ${start}${slut ? ` til ${slut}` : ""}
 Kanaler til rådighed: ${kanaler.join(", ")}
+
+${klipRegler(kanaler)}
 
 Lav ${antal} opslag.
 
@@ -250,6 +287,11 @@ function opslagsliste(opslag) {
 }
 
 function omskrivOpgave({ brand, kampagne, opslag, instruks }) {
+  // Kanalerne står på opslagene her, ikke i en liste for sig.
+  const kanaler = [...new Set(
+    opslag.flatMap((o) => (o.maal ?? []).map((m) => m.platform)).filter(Boolean),
+  )];
+
   return `${brandBriefing(brand)}
 
 ---
@@ -261,6 +303,10 @@ ${kampagne.goal ? `Mål: ${kampagne.goal}` : ""}
 Her er de ${opslag.length} opslag som de ser ud nu:
 
 ${opslagsliste(opslag)}
+
+---
+
+${klipRegler(kanaler)}
 
 ---
 
