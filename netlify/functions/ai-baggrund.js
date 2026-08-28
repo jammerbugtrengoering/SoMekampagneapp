@@ -17,11 +17,19 @@ import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
 
 const MODEL = process.env.GEMINI_IMAGE_MODEL ?? 'gemini-3.1-flash-image'
 
+// Google forventer forholdet som parameter. At bede om det i prompten i
+// stedet gav billeder der var *næsten* rigtige — og et opslag der er beskåret
+// skævt på Instagram ser sjusket ud.
 const FORMATER = {
-  kvadrat: '1:1 kvadratisk',
-  hoej: '4:5 stående',
-  bred: '16:9 liggende',
+  kvadrat: '1:1',
+  hoej: '4:5',
+  bred: '16:9',
 }
+
+// Interactions API afløste generateContent til billeder. Revisionen skal med:
+// uden den svarer Google med det nyeste format, og så knækker det den dag de
+// ændrer noget.
+const REVISION = process.env.GEMINI_API_REVISION ?? '2026-05-20'
 
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
@@ -53,7 +61,7 @@ export default async function handler(req) {
 
   const format = FORMATER[krop.format] ?? FORMATER.kvadrat
 
-  const prompt = `Lav en abstrakt baggrund til et opslag på sociale medier. Format: ${format}.
+  const prompt = `Lav en abstrakt baggrund til et opslag på sociale medier.
 
 ${beskrivelse}
 
@@ -65,14 +73,23 @@ Krav:
 - Fotografisk eller grafisk, men tydeligt en baggrund — ikke et motiv.`
 
   try {
-    const svar = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': noegle },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    const svar = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': noegle,
+        'Api-Revision': REVISION,
       },
-    )
+      body: JSON.stringify({
+        model: MODEL,
+        input: [{ type: 'text', text: prompt }],
+        response_format: {
+          type: 'image',
+          mime_type: 'image/jpeg',
+          aspect_ratio: format,
+        },
+      }),
+    })
 
     const tekst = await svar.text()
 
@@ -89,12 +106,18 @@ Krav:
           502,
         )
       }
+      if (svar.status === 401 || svar.status === 403) {
+        return jsonSvar({ fejl: 'Gemini afviste nøglen. Er GEMINI_API_KEY gyldig og fakturering slået til?' }, 502)
+      }
+      if (svar.status === 429) {
+        return jsonSvar({ fejl: 'Gemini har sagt stop for nu (kvote). Prøv igen om lidt.' }, 502)
+      }
       return jsonSvar({ fejl: `Gemini svarede ${svar.status}: ${tekst.slice(0, 250)}` }, 502)
     }
 
     const data = JSON.parse(tekst)
-    const dele = data.candidates?.[0]?.content?.parts ?? []
-    const billede = dele.find((d) => d.inlineData?.data)
+    const dele = (data.steps ?? []).flatMap((s) => s.content ?? [])
+    const billede = dele.find((d) => d.type === 'image' && d.data)
 
     if (!billede) {
       // Modellen svarer nogle gange med tekst i stedet — typisk når prompten
@@ -112,8 +135,8 @@ Krav:
 
     return jsonSvar({
       ok: true,
-      base64: billede.inlineData.data,
-      mimeType: billede.inlineData.mimeType ?? 'image/png',
+      base64: billede.data,
+      mimeType: billede.mime_type ?? 'image/jpeg',
     })
   } catch (e) {
     console.error('AI-baggrund fejlede:', e)

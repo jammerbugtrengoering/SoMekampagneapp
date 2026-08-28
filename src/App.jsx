@@ -2579,6 +2579,71 @@ function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
     await genindlaes();
   }
 
+  /**
+   * Sletter kunden med alt hvad der hænger under den.
+   *
+   * Databasen har cascade hele vejen — kunde → brands → kanaler, kampagner,
+   * opslag og billedrækker. Derfor tæller vi op FØR vi spørger, så du kan se
+   * præcis hvad der forsvinder, og skriver navnet for at bekræfte. En ryd-op i
+   * demodata skal ikke kunne komme til at tage en rigtig kundes historik.
+   *
+   * Publicerede opslag er en hård stopklods: de står ude på Facebook eller
+   * Instagram, og basen er det eneste sted der ved hvad vi sendte hvornår.
+   */
+  async function sletKunde() {
+    setVenter("slet");
+
+    const { data: brands } = await supabase
+      .from("brands").select("id, name").eq("customer_id", kunde.id);
+    const brandIder = (brands ?? []).map((b) => b.id);
+
+    const tael = async (tabel, kolonne, ekstra) => {
+      if (!brandIder.length) return 0;
+      let q = supabase.from(tabel).select("id", { count: "exact", head: true }).in(kolonne, brandIder);
+      if (ekstra) q = ekstra(q);
+      const { count } = await q;
+      return count ?? 0;
+    };
+
+    const kanaler = await tael("channels", "brand_id");
+    const kampagner = await tael("campaigns", "brand_id");
+    const opslag = await tael("posts", "brand_id");
+    const publicerede = await tael("posts", "brand_id", (q) => q.eq("status", "published"));
+
+    setVenter("");
+
+    if (publicerede) {
+      return visToast(
+        `${kunde.name} har ${publicerede} publiceret opslag. Kunden kan ikke slettes — ` +
+        "det ville slette historikken om noget der ligger ude på siden.", false,
+      );
+    }
+
+    const linjer = [
+      `${brandIder.length} brand(s)`,
+      `${kanaler} kanal(er)`,
+      `${kampagner} kampagne(r)`,
+      `${opslag} opslag`,
+    ].join("\n  ");
+
+    if (!window.confirm(
+      `Slet "${kunde.name}" og alt under den?\n\n  ${linjer}\n\n` +
+      "Det kan ikke fortrydes. Uploadede billedfiler bliver liggende i storage.",
+    )) return;
+
+    const skrevet = window.prompt(`Skriv kundens navn for at bekræfte:\n${kunde.name}`);
+    if (skrevet?.trim() !== kunde.name) {
+      return visToast("Navnet passede ikke. Intet er slettet.", false);
+    }
+
+    setVenter("slet");
+    const { error } = await supabase.from("customers").delete().eq("id", kunde.id);
+    setVenter("");
+    if (error) return visToast(error.message, false);
+    visToast(`${kunde.name} er slettet.`);
+    await genindlaes();
+  }
+
   async function test() {
     setVenter("test");
     setTestsvar(null);
@@ -2647,6 +2712,19 @@ function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
             <button style={styles.secondaryBtn} onClick={onAnnuller}>Annuller</button>
           )}
         </div>
+
+        {kunde && (
+          <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+            <div style={styles.dt}>Slet kunden</div>
+            <p style={styles.dæmpetLille}>
+              Tager brands, kanaler, kampagner og opslag med sig. Du får talt op og
+              skal skrive navnet først. Er noget publiceret, nægter den.
+            </p>
+            <button style={styles.sletBtn} disabled={!!venter} onClick={sletKunde}>
+              <Trash2 size={13} /> {venter === "slet" ? "Tæller op…" : `Slet ${kunde.name}`}
+            </button>
+          </div>
+        )}
       </div>
 
       <div style={styles.kort}>
