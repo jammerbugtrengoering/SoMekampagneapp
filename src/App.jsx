@@ -542,20 +542,31 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, ga
         <div style={styles.kalKrop}>
           {celler.map(({ dato, iMaaned, liste }, i) => {
             const n = datoNoegle(dato);
+            const weekend = i % 7 >= 5;
+            const sidsteRaekke = i >= celler.length - 7;
+
+            // Fire opslag på én dag fylder cellen ud og gør rækken dobbelt så
+            // høj som naboerne. Tre og en tæller holder gitteret roligt.
+            const vist = liste.slice(0, 3);
+            const flere = liste.length - vist.length;
+
             return (
               <div
                 key={n}
                 style={{
                   ...styles.kalCelle,
-                  opacity: iMaaned ? 1 : 0.4,
-                  background: n === iDag ? "#EEF2FE" : "#fff",
+                  opacity: iMaaned ? 1 : 0.45,
+                  background: weekend ? "#FAFBFF" : "#fff",
                   borderRight: (i + 1) % 7 === 0 ? "none" : "1px solid #E7EAF3",
+                  borderBottom: sidsteRaekke ? "none" : "1px solid #E7EAF3",
                 }}
               >
-                <div style={{ ...styles.kalDag, fontWeight: n === iDag ? 700 : 400 }}>
-                  {dato.getDate()}
+                <div style={styles.kalDag}>
+                  <span style={n === iDag ? styles.kalDagIdag : undefined}>
+                    {dato.getDate()}
+                  </span>
                 </div>
-                {liste.map((o) => {
+                {vist.map((o) => {
                   const farve = brands.find((b) => b.id === o.brand_id)?.colors?.primary ?? "#64748B";
                   const st = STATUS[o.status] ?? STATUS.draft;
                   return (
@@ -579,6 +590,14 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, ga
                     </button>
                   );
                 })}
+                {flere > 0 && (
+                  <button style={{ ...styles.kalFlere, border: "none", background: "none",
+                    textAlign: "left", cursor: "pointer", font: "inherit", fontSize: 10.5,
+                    color: "#64748B" }}
+                    onClick={() => liste[3]?.campaign_id && aabnKampagne(liste[3].campaign_id)}>
+                    +{flere} mere
+                  </button>
+                )}
               </div>
             );
           })}
@@ -3313,17 +3332,29 @@ const styles = {
 
   kalender: { background: "#fff", borderRadius: 12, overflow: "hidden",
     boxShadow: "0 1px 2px rgba(15,23,42,0.07)" },
-  kalHoved: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", background: "#F8FAFF",
-    borderBottom: "1px solid #E7EAF3" },
-  kalHovedCelle: { padding: "7px 10px", fontSize: 11, textTransform: "uppercase",
+  // minmax(0, 1fr) og ikke 1fr: 1fr betyder "mindst så bred som indholdet", så
+  // en dag med et opslag i skubbede sin kolonne bredere end de tomme, og hele
+  // gitteret skred. Nul som minimum tvinger syv lige brede kolonner.
+  kalHoved: { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+    background: "#F8FAFF", borderBottom: "1px solid #E7EAF3" },
+  kalHovedCelle: { padding: "8px 8px", fontSize: 11, textTransform: "uppercase",
     letterSpacing: "0.08em", color: "#64748B" },
-  kalKrop: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)" },
-  kalCelle: { minHeight: 116, padding: 6, borderBottom: "1px solid #E7EAF3",
-    display: "flex", flexDirection: "column", gap: 4 },
-  kalDag: { fontSize: 11.5, color: "#64748B", fontVariantNumeric: "tabular-nums" },
-  kalChip: { display: "block", width: "100%", textAlign: "left", border: "none",
-    borderRadius: "0 5px 5px 0", padding: "4px 6px", fontSize: 11, lineHeight: 1.3,
-    color: "#111111", cursor: "pointer", fontFamily: "inherit" },
+  kalKrop: { display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" },
+  // overflow + minWidth holder et langt opslag inde i sin egen dag.
+  kalCelle: { minHeight: 116, padding: 8, display: "flex", flexDirection: "column",
+    gap: 4, minWidth: 0, overflow: "hidden" },
+  kalDag: { fontSize: 11.5, color: "#64748B", fontVariantNumeric: "tabular-nums",
+    marginBottom: 2 },
+  // I dag: en lille skive om tallet i stedet for at farve hele feltet, så
+  // rækken ikke bliver urolig.
+  kalDagIdag: { display: "inline-flex", alignItems: "center", justifyContent: "center",
+    minWidth: 20, height: 20, borderRadius: 999, background: "#2F5DE0", color: "#fff",
+    fontWeight: 700, padding: "0 5px" },
+  kalChip: { display: "block", width: "100%", maxWidth: "100%", textAlign: "left",
+    border: "none", borderRadius: "0 5px 5px 0", padding: "4px 6px", fontSize: 11,
+    lineHeight: 1.3, color: "#111111", cursor: "pointer", fontFamily: "inherit",
+    overflow: "hidden" },
+  kalFlere: { fontSize: 10.5, color: "#64748B", padding: "1px 6px" },
   kalChipTid: { display: "block", fontSize: 10, color: "#64748B" },
   kalChipTekst: { display: "block", overflow: "hidden", textOverflow: "ellipsis",
     whiteSpace: "nowrap", margin: "1px 0 2px" },
