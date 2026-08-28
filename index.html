@@ -3,11 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- 32 px først: browseren vælger den mindste der passer, og en nedskaleret
-         512'er bliver grødet i fanen. -->
+    <!-- SVG'en er kilden og skalerer skarpt; PNG'erne er til dem der ikke
+         tager SVG-favicons, og til hjemmeskærmen på telefonen. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-    <link rel="icon" type="image/png" sizes="512x512" href="/favicon-512.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- Samme sorte som appens topbjælke, så telefonen farver kanten ens. -->
     <meta name="theme-color" content="#111111" />
     <title>Kampagner</title>
   </head>
