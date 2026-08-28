@@ -387,7 +387,9 @@ function Kampagneapp({ session, onLogUd }) {
     <div style={styles.app}>
       <header style={styles.header}>
         <div style={styles.brand}>
-          <div style={styles.brandMark}>SK</div>
+          {/* Samme mærke som i browserfanen — hentes fra public/, så ikonet
+              kun findes ét sted og ikke skal rettes to. */}
+          <img src="/favicon.svg" alt="" style={styles.brandMark} />
           <div>
             <div style={styles.brandTitle}>Kampagner</div>
             <div style={styles.brandSub}>
@@ -3245,8 +3247,8 @@ const styles = {
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 24px",
     background: "#111111", color: "#fff", flexWrap: "wrap", gap: 12, position: "sticky", top: 0, zIndex: 100 },
   brand: { display: "flex", alignItems: "center", gap: 12 },
-  brandMark: { width: 36, height: 36, borderRadius: 10, background: "#2F5DE0", display: "flex",
-    alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13 },
+  // Ikonet har sin egen afrundede baggrund, så her skal kun størrelsen sættes.
+  brandMark: { width: 36, height: 36, borderRadius: 10, display: "block" },
   brandTitle: { fontWeight: 600, fontSize: 16 },
   brandSub: { fontSize: 12, color: "#9BB4F5" },
   nav: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" },
