@@ -21,7 +21,8 @@
     "test:kanalregler": "node scripts/test-kanalregler.mjs",
     "test:omskrivning": "node scripts/test-omskrivning.mjs",
     "admin:list": "node scripts/admin-add.mjs --liste",
-    "admin:remove": "node scripts/admin-add.mjs --fjern"
+    "admin:remove": "node scripts/admin-add.mjs --fjern",
+    "test:adskillelse": "node scripts/test-adskillelse.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",

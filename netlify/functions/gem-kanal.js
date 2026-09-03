@@ -1,6 +1,6 @@
 import { krypter, maskeer } from './_lib/krypto.js'
 import { gaeldendeToken, testKanal } from './_lib/meta.js'
-import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
+import { adminKlient, jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
 
 /**
  * POST /api/gem-kanal
@@ -13,12 +13,23 @@ import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
  *
  * Med handling: "test" testes en gemt kanal i stedet.
  */
+/**
+ * Hvilken organisation hører brandet under?
+ *
+ * Bruges når en NY kanal oprettes: der er intet kanal-id at slå op endnu,
+ * og organisationen må ikke komme fra kaldet selv. Opslaget sker med secret
+ * key, men resultatet bruges kun til at afgøre hvad brugerens rolle skal
+ * måles imod — svarer hun ikke, ryger kaldet på 403 lige efter.
+ */
+async function orgForBrand(brandId) {
+  if (!brandId) return null
+  const { data } = await adminKlient()
+    .from('brands').select('customers(organisation_id)').eq('id', brandId).maybeSingle()
+  return data?.customers?.organisation_id ?? null
+}
+
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
-
-  const adgang = await kraevAdmin(req)
-  if (!adgang.ok) return adgang.svar
-  const klient = adgang.klient
 
   let krop
   try {
@@ -26,6 +37,17 @@ export default async function handler(req) {
   } catch {
     return jsonSvar({ fejl: 'Ugyldig JSON.' }, 400)
   }
+
+  // Kanalen peger på en rigtig Facebook-side og kan bære sit eget token.
+  // Derfor ejer, ikke redaktør. Organisationen udledes af kanalen eller af
+  // brandet, så den ikke kan sendes med udefra.
+  const adgang = await kraevOrgRolle(req, {
+    roller: ['ejer'],
+    kanalId: krop.kanalId ?? null,
+    orgId: await orgForBrand(krop.brandId),
+  })
+  if (!adgang.ok) return adgang.svar
+  const klient = adgang.klient
 
   // ---- Test af en eksisterende kanal ----
   if (krop.handling === 'test') {

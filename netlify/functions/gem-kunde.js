@@ -1,6 +1,6 @@
 import { krypter, maskeer } from './_lib/krypto.js'
 import { testKanal } from './_lib/meta.js'
-import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
+import { jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
 
 /**
  * POST /api/gem-kunde
@@ -38,16 +38,24 @@ function lavSlug(navn) {
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
 
-  const adgang = await kraevAdmin(req)
-  if (!adgang.ok) return adgang.svar
-  const klient = adgang.klient
-
   let krop
   try {
     krop = await req.json()
   } catch {
     return jsonSvar({ fejl: 'Ugyldig JSON.' }, 400)
   }
+
+  // Kunden bærer aftalen og Meta-tokenet, så det er ejerens bord. Retter
+  // vi en kunde der findes, udleder vi organisationen af den — så kan man
+  // ikke flytte en kunde til en anden organisation ved at sende et andet
+  // orgId med.
+  const adgang = await kraevOrgRolle(req, {
+    roller: ['ejer'],
+    kundeId: krop.kundeId ?? null,
+    orgId: krop.kundeId ? null : (krop.orgId ?? null),
+  })
+  if (!adgang.ok) return adgang.svar
+  const klient = adgang.klient
 
   // ---- Test kundens token mod alle dens kanaler ----
   if (krop.handling === 'test') {
@@ -110,7 +118,7 @@ export default async function handler(req) {
   }
 
   // ---- Gem stamkortet ----
-  const { kundeId, token, ...felter } = krop
+  const { kundeId, token, orgId: _orgId, ...felter } = krop
 
   const tilladt = [
     'name', 'slug', 'kontakt_navn', 'kontakt_mail', 'kontakt_telefon',
@@ -153,7 +161,11 @@ export default async function handler(req) {
     // løbenummer i stedet for at kaste en rå databasefejl i hovedet på folk.
     for (let forsoeg = 0; forsoeg < 5; forsoeg++) {
       const slug = forsoeg === 0 ? grundslug : `${grundslug}-${forsoeg + 1}`
-      const { error } = await klient.from('customers').insert({ ...opdatering, slug })
+      // organisation_id er obligatorisk efter 0005: en kunde uden
+      // organisation ville være usynlig for alle.
+      const { error } = await klient
+        .from('customers')
+        .insert({ ...opdatering, slug, organisation_id: adgang.orgId })
 
       if (!error) { sidsteFejl = null; break }
       sidsteFejl = error
