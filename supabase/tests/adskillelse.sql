@@ -126,6 +126,14 @@ select pg_temp.tjek(
    where org_id = 'aaaaaaaa-0000-0000-0000-000000000001') = 0,
   'PGU ser ikke Jammerbugts medlemmer');
 
+-- Den kontrol der fangede en rigtig fejl: en visning kører som standard med
+-- ejerens rettigheder og går uden om RLS. kanal_med_token udleverede alle
+-- kunders tokens til enhver der var logget ind, uden at det kunne ses ved at
+-- læse politikkerne. Bliver security_invoker slået fra igen, fejler den her.
+select pg_temp.tjek(
+  (select count(*) from public.kanal_med_token) = 0,
+  'kanal_med_token lækker ikke tokens på tværs (visningen læser som kalderen)');
+
 -- =====================================================================
 -- 2. PGU må ikke kunne ÆNDRE noget hos Jammerbugt
 --

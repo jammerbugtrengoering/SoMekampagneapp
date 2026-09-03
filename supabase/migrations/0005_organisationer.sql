@@ -522,6 +522,21 @@ join public.org_members m on m.org_id = o.id
 where m.user_id = auth.uid();
 
 -- ---------------------------------------------------------------------
+-- Visninger skal læse med KALDERENS rettigheder
+--
+-- Det her er den fejl der er værd at kende: en almindelig visning i
+-- Postgres kører med ejerens rettigheder og går derfor uden om RLS på de
+-- tabeller den læser. kanal_med_token fra 0004 udleverede altså enhver
+-- kundes gaeldende_token til enhver der var logget ind — testen fangede
+-- det, og det var ikke til at se ved at læse politikkerne.
+--
+-- security_invoker gør at visningen læser som den der spørger, og så
+-- gælder politikkerne igen. Kræver Postgres 15, som Supabase kører.
+-- ---------------------------------------------------------------------
+alter view public.kanal_med_token set (security_invoker = on);
+alter view public.mine_organisationer set (security_invoker = on);
+
+-- ---------------------------------------------------------------------
 -- app_admins bliver stående — indtil videre
 -- ---------------------------------------------------------------------
 -- Netlify-funktionerne slår stadig op i den for at afgøre om et kald må

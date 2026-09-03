@@ -1,4 +1,4 @@
-import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
+import { jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
 
 /**
  * POST /api/ai-baggrund  { beskrivelse, format }
@@ -34,7 +34,9 @@ const REVISION = process.env.GEMINI_API_REVISION ?? '2026-05-20'
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
 
-  const adgang = await kraevAdmin(req)
+  // AI-baggrunde koster penge per billede, men hører til indholdsarbejdet.
+  // Derfor redaktør og ejer — ikke en godkender.
+  const adgang = await kraevOrgRolle(req, { roller: ['ejer', 'redaktoer'] })
   if (!adgang.ok) return adgang.svar
 
   const noegle = process.env.GEMINI_API_KEY

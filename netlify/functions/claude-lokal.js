@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import {
   KAMPAGNE_SKEMA, OMSKRIV_SKEMA, byggOmskrivOpgave, byggOpgave,
 } from '../../src/prompt.js'
-import { jsonSvar, kraevAdmin } from './_lib/supabase.js'
+import { jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
 
 /**
  * POST /api/claude-lokal
@@ -96,7 +96,8 @@ function koerClaude(opgave, skema, model) {
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
 
-  const adgang = await kraevAdmin(req)
+  // At skrive kampagnetekst er redaktørens arbejde.
+  const adgang = await kraevOrgRolle(req, { roller: ['ejer', 'redaktoer'] })
   if (!adgang.ok) return adgang.svar
 
   const naegtet = maaKoereLokalt(process.env)

@@ -22,7 +22,11 @@
     "test:omskrivning": "node scripts/test-omskrivning.mjs",
     "admin:list": "node scripts/admin-add.mjs --liste",
     "admin:remove": "node scripts/admin-add.mjs --fjern",
-    "test:adskillelse": "node scripts/test-adskillelse.mjs"
+    "test:adskillelse": "node scripts/test-adskillelse.mjs",
+    "org": "node scripts/org.mjs",
+    "org:opret": "node scripts/org.mjs --opret",
+    "org:medlem": "node scripts/org.mjs --medlem",
+    "org:fjern": "node scripts/org.mjs --fjern"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",

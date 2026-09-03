@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 /**
  * Service-role klient til funktionerne. Går uden om RLS.
  *
- * Bruges kun efter at kaldet er godkendt: enten via kraevAdmin() nedenfor,
+ * Bruges kun efter at kaldet er godkendt: enten via kraevOrgRolle() nedenfor,
  * eller via CRON_SECRET i den planlagte publicering.
  */
 export function adminKlient() {
@@ -25,46 +25,15 @@ export function adminKlient() {
   })
 }
 
-/**
- * Slår brugerens bearer-token op og bekræfter at hun står i app_admins.
+/*
+ * kraevAdmin() er fjernet med migration 0005.
  *
- * Funktionerne kører med service-role og kan alt. Derfor er det her, og ikke
- * i skærmbilledet, at adgangen faktisk afgøres — et POST med curl skal falde
- * på samme sten som en uautoriseret bruger i browseren.
- *
- * Returnerer { ok: true, bruger } eller { ok: false, svar } hvor svar er en
- * færdig Response der kan returneres direkte.
+ * Den slog op i app_admins — én global liste over folk der kunne alt. Efter
+ * organisationerne er adgang ikke længere et ja/nej, men en rolle i en
+ * bestemt organisation, og det er kraevOrgRolle() nedenfor der afgør den.
+ * Funktionen står ikke tilbage som en genvej: en adgangskontrol der ikke
+ * længere kontrollerer noget, er farligere end ingen.
  */
-export async function kraevAdmin(req) {
-  const auth = req.headers.get('authorization') ?? ''
-  const token = auth.replace(/^Bearer\s+/i, '').trim()
-
-  if (!token) {
-    return { ok: false, svar: jsonSvar({ fejl: 'Ikke logget ind.' }, 401) }
-  }
-
-  const klient = adminKlient()
-
-  const { data, error } = await klient.auth.getUser(token)
-  if (error || !data?.user) {
-    return { ok: false, svar: jsonSvar({ fejl: 'Ugyldig session.' }, 401) }
-  }
-
-  const { data: admin } = await klient
-    .from('app_admins')
-    .select('user_id')
-    .eq('user_id', data.user.id)
-    .maybeSingle()
-
-  if (!admin) {
-    return {
-      ok: false,
-      svar: jsonSvar({ fejl: 'Din bruger er ikke administrator i kampagneappen.' }, 403),
-    }
-  }
-
-  return { ok: true, bruger: data.user, klient }
-}
 
 /**
  * Kræver at brugeren har en af rollerne i en bestemt organisation.

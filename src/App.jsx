@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle, Calendar, Check, ChevronLeft, ChevronRight, Eye,
   Image as ImageIcon, Loader2, LogOut, Plus, RefreshCw, Send, Sparkles,
-  Pencil, Trash2, Users, X,
+  Pencil, Trash2, UserPlus, Users, X,
 } from "lucide-react";
 import { supabase, kaldApi, opsaetningsfejl } from "./supabaseClient";
 import {
@@ -38,6 +38,15 @@ const PLATFORM = { facebook: "Facebook", instagram: "Instagram", linkedin: "Link
 const PLATFORM_KORT = { facebook: "FB", instagram: "IG", linkedin: "LI" };
 
 const UGEDAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
+
+// Rollerne som de hedder i basen, og som de skal læses af et menneske.
+const ROLLER = { ejer: "Ejer", redaktoer: "Redaktør", godkender: "Godkender" };
+
+const ROLLE_FORKLARING = {
+  ejer: "Alt: kunder, Meta-tokens, medlemmer og publicering.",
+  redaktoer: "Kampagner, opslag og billeder. Ikke tokens, ikke medlemmer.",
+  godkender: "Må se alt og kun godkende eller afvise et opslag. Kan ikke rette teksten.",
+};
 
 /* ---------------------------------------------------------------------
    Dato-hjælpere. Alt regnes i lokal tid — et opslag kl. 01:00 dansk tid
@@ -284,7 +293,10 @@ function VaelgAdgangskode({ onFaerdig }) {
    ===================================================================== */
 
 function Kampagneapp({ session, onLogUd }) {
-  const [erAdmin, setErAdmin] = useState(null);
+  // null betyder "ved det ikke endnu". Tom liste betyder "ingen adgang", og
+  // de to skal ikke se ens på skærmen.
+  const [orgs, setOrgs] = useState(null);
+  const [orgId, setOrgId] = useState(null);
   const [side, setSide] = useState("kalender");
   const [maaned, setMaaned] = useState(() => maanedNoegle(new Date()));
   const [valgtKampagne, setValgtKampagne] = useState(null);
@@ -310,31 +322,63 @@ function Kampagneapp({ session, onLogUd }) {
 
   // Adgangen håndhæves i databasen, men vi spørger også her — ellers får
   // brugeren en side fuld af tomme lister uden at forstå hvorfor.
+  //
+  // mine_organisationer er en visning der kun viser det man er medlem af,
+  // med rollen på. Den erstatter det gamle opslag i app_admins, som en
+  // godkender aldrig kommer til at stå i.
   useEffect(() => {
     supabase
-      .from("app_admins")
-      .select("user_id")
-      .eq("user_id", session.user.id)
-      .maybeSingle()
-      .then(({ data }) => setErAdmin(!!data));
+      .from("mine_organisationer")
+      .select("*")
+      .order("name")
+      .then(({ data }) => {
+        const liste = data ?? [];
+        setOrgs(liste);
+        setOrgId((nu) => nu ?? liste[0]?.id ?? null);
+      });
   }, [session.user.id]);
 
+  const org = orgs?.find((o) => o.id === orgId) ?? orgs?.[0] ?? null;
+  const rolle = org?.rolle ?? null;
+  const kanRedigere = rolle === "ejer" || rolle === "redaktoer";
+  const erEjer = rolle === "ejer";
+
+  /**
+   * Henter alt der hører til den valgte organisation.
+   *
+   * Basen ville i forvejen kun give os det vi må se, men er man med i to
+   * organisationer, må skærmen vise én ad gangen — ellers står Jammerbugts
+   * og PGU's kampagner mellem hinanden i kalenderen. Derfor filtreres der
+   * ned gennem kæden: kunde → brand → resten.
+   */
   const hentAlt = useCallback(async () => {
+    if (!orgId) return;
     setHenter(true);
 
-    const [ku, b, k, c, p] = await Promise.all([
-      supabase.from("customers").select("*").order("name"),
-      supabase.from("brands").select("*, customers(*)").order("name"),
-      supabase.from("channels").select("*").order("platform"),
-      supabase.from("campaigns").select("*").order("created_at", { ascending: false }),
-      supabase
-        .from("posts")
-        .select("*, post_targets(id, status, error, permalink, channel_id, channels(platform, display_name))")
-        .order("scheduled_at", { ascending: true }),
-    ]);
+    const { data: ku } = await supabase
+      .from("customers").select("*").eq("organisation_id", orgId).order("name");
+    const kundeIder = (ku ?? []).map((c) => c.id);
 
-    setKunder(ku.data ?? []);
-    setBrands(b.data ?? []);
+    const { data: b } = kundeIder.length
+      ? await supabase.from("brands").select("*, customers(*)").in("customer_id", kundeIder).order("name")
+      : { data: [] };
+    const brandIder = (b ?? []).map((x) => x.id);
+
+    const [k, c, p] = brandIder.length
+      ? await Promise.all([
+          supabase.from("channels").select("*").in("brand_id", brandIder).order("platform"),
+          supabase.from("campaigns").select("*").in("brand_id", brandIder)
+            .order("created_at", { ascending: false }),
+          supabase
+            .from("posts")
+            .select("*, post_targets(id, status, error, permalink, channel_id, channels(platform, display_name))")
+            .in("brand_id", brandIder)
+            .order("scheduled_at", { ascending: true }),
+        ])
+      : [{ data: [] }, { data: [] }, { data: [] }];
+
+    setKunder(ku ?? []);
+    setBrands(b ?? []);
     setKanaler(k.data ?? []);
     setKampagner(c.data ?? []);
     setOpslag(
@@ -352,15 +396,25 @@ function Kampagneapp({ session, onLogUd }) {
       })),
     );
     setHenter(false);
-  }, []);
+  }, [orgId]);
 
-  useEffect(() => { if (erAdmin) hentAlt(); }, [erAdmin, hentAlt]);
+  useEffect(() => { if (orgId) hentAlt(); }, [orgId, hentAlt]);
 
-  if (erAdmin === null) {
+  // Hvilke sider rollen har. Udregnes under render frem for at rettes i en
+  // effect: skifter man organisation og går fra ejer til godkender, ville en
+  // effect vise medlemssiden et øjeblik først.
+  const tilladteSider = rolle === "godkender"
+    ? ["kalender", "kampagner"]
+    : rolle === "redaktoer"
+      ? ["kalender", "ny", "kampagner", "kunder"]
+      : ["kalender", "ny", "kampagner", "kunder", "medlemmer"];
+  const visSide = tilladteSider.includes(side) ? side : "kalender";
+
+  if (orgs === null) {
     return <Fuldskaerm><Loader2 size={20} /> Tjekker adgang…</Fuldskaerm>;
   }
 
-  if (!erAdmin) {
+  if (!orgs.length) {
     return (
       <div style={styles.loginWrap}>
         <div style={styles.loginKort}>
@@ -368,7 +422,7 @@ function Kampagneapp({ session, onLogUd }) {
           <h1 style={styles.loginTitel}>Ingen adgang</h1>
           <p style={styles.loginSub}>
             Du er logget ind som <strong>{session.user.email}</strong>, men din bruger er ikke
-            administrator i kampagneappen. Bed en administrator om at tilføje dig.
+            medlem af nogen organisation. Bed en ejer om at invitere dig.
           </p>
           <button style={{ ...styles.secondaryBtn, width: "100%", justifyContent: "center" }} onClick={onLogUd}>
             <LogOut size={15} /> Log ud
@@ -396,18 +450,35 @@ function Kampagneapp({ session, onLogUd }) {
               {kunder.length} kunder · {brands.length} brands · {opslag.length} opslag
             </div>
           </div>
+
+          {/* Er man kun med i én organisation, er en vælger med ét valg
+              bare støj — så står navnet der som en oplysning. */}
+          {orgs.length > 1 ? (
+            <select style={styles.orgVaelger} value={orgId ?? ""}
+              onChange={(e) => { setOrgId(e.target.value); setValgtKampagne(null); setValgtKunde(null); }}
+              title="Skift organisation">
+              {orgs.map((o) => (
+                <option key={o.id} value={o.id}>{o.name}</option>
+              ))}
+            </select>
+          ) : (
+            <span style={styles.orgNavn}>{org?.name}</span>
+          )}
+
+          <span style={styles.rolleMaerkat}>{ROLLER[rolle] ?? rolle}</span>
         </div>
 
         <nav style={styles.nav}>
           {[
-            ["kalender", "Kalender", Calendar],
-            ["ny", "Ny kampagne", Sparkles],
-            ["kampagner", "Kampagner", Send],
-            ["kunder", "Kunder", Users],
-          ].map(([id, mrk, Ikon]) => (
+            ["kalender", "Kalender", Calendar, true],
+            ["ny", "Ny kampagne", Sparkles, kanRedigere],
+            ["kampagner", "Kampagner", Send, true],
+            ["kunder", "Kunder", Users, kanRedigere],
+            ["medlemmer", "Medlemmer", UserPlus, erEjer],
+          ].filter(([, , , vis]) => vis).map(([id, mrk, Ikon]) => (
             <button
               key={id}
-              style={side === id ? styles.navBtnActive : styles.navBtn}
+              style={visSide === id ? styles.navBtnActive : styles.navBtn}
               onClick={() => setSide(id)}
             >
               <Ikon size={14} style={{ marginRight: 5, verticalAlign: -2 }} />
@@ -435,14 +506,14 @@ function Kampagneapp({ session, onLogUd }) {
       <main style={styles.page}>
         {henter ? (
           <p style={styles.dæmpet}><Loader2 size={15} style={{ verticalAlign: -2 }} /> Henter data…</p>
-        ) : side === "kalender" ? (
+        ) : visSide === "kalender" ? (
           <Kalender
             maaned={maaned} setMaaned={setMaaned} opslag={opslag} brands={brands}
             kanaler={kanaler}
             aabnKampagne={(id) => { setValgtKampagne(id); setSide("kampagner"); }}
             gaaTilNy={() => setSide("ny")}
           />
-        ) : side === "ny" ? (
+        ) : visSide === "ny" ? (
           <NyKampagne
             brands={brands} kanalerFor={kanalerFor} visToast={visToast}
             efterOprettelse={async (id) => {
@@ -451,16 +522,19 @@ function Kampagneapp({ session, onLogUd }) {
               setSide("kampagner");
             }}
           />
-        ) : side === "kampagner" ? (
+        ) : visSide === "kampagner" ? (
           <Kampagner
             kampagner={kampagner} opslag={opslag} brands={brands} kunder={kunder}
-            brandFor={brandFor} kanalerFor={kanalerFor}
+            brandFor={brandFor} kanalerFor={kanalerFor} rolle={rolle}
             valgt={valgtKampagne} setValgt={setValgtKampagne}
             visToast={visToast} genindlaes={hentAlt}
           />
+        ) : visSide === "medlemmer" ? (
+          <Medlemmer org={org} session={session} visToast={visToast} />
         ) : (
           <Kunder
             kunder={kunder} brands={brands} kanalerFor={kanalerFor}
+            orgId={orgId} rolle={rolle}
             valgt={valgtKunde ?? kunder[0]?.id} setValgt={setValgtKunde}
             visToast={visToast} genindlaes={hentAlt}
           />
@@ -2483,7 +2557,172 @@ function AiFane({ venter, onBillede, onFejl }) {
    Kunder
    ===================================================================== */
 
-function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindlaes }) {
+/* =====================================================================
+   Medlemmer i organisationen
+
+   Kun ejeren kommer herind. Rollen håndhæves i basen — politikken på
+   org_members kræver ejer — men vi viser det heller ikke, for en knap der
+   altid fejler er værre end ingen knap.
+   ===================================================================== */
+
+function Medlemmer({ org, session, visToast }) {
+  const [liste, setListe] = useState(null);
+  const [mail, setMail] = useState("");
+  const [navn, setNavn] = useState("");
+  const [nyRolle, setNyRolle] = useState("redaktoer");
+  const [venter, setVenter] = useState("");
+  const [fejl, setFejl] = useState("");
+
+  const hent = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("org_members")
+      .select("*")
+      .eq("org_id", org.id)
+      .order("created_at");
+    if (error) setFejl(error.message);
+    setListe(data ?? []);
+  }, [org.id]);
+
+  useEffect(() => { hent(); }, [hent]);
+
+  async function inviter() {
+    setFejl("");
+    if (!mail.trim()) return setFejl("Skriv en e-mail.");
+    setVenter("inviter");
+    const svar = await kaldApi("inviter-medlem", {
+      orgId: org.id, email: mail.trim(), navn: navn.trim(), rolle: nyRolle,
+    });
+    setVenter("");
+    if (!svar.ok) return setFejl(svar.fejl);
+    visToast(svar.besked);
+    setMail(""); setNavn("");
+    await hent();
+  }
+
+  async function skiftRolle(m, rolle) {
+    setFejl("");
+    // Den sidste ejer må ikke degraderes: så kan ingen længere invitere,
+    // rette tokens eller rydde op — og der er ingen vej tilbage i appen.
+    if (m.rolle === "ejer" && rolle !== "ejer"
+        && liste.filter((x) => x.rolle === "ejer").length === 1) {
+      return setFejl("Organisationen skal have mindst én ejer. Gør en anden til ejer først.");
+    }
+    setVenter(m.user_id);
+    const { error } = await supabase
+      .from("org_members").update({ rolle }).eq("org_id", org.id).eq("user_id", m.user_id);
+    setVenter("");
+    if (error) return setFejl(error.message);
+    visToast(`${m.email ?? "Medlemmet"} er nu ${(ROLLER[rolle] ?? rolle).toLowerCase()}.`);
+    await hent();
+  }
+
+  async function fjern(m) {
+    setFejl("");
+    if (m.rolle === "ejer" && liste.filter((x) => x.rolle === "ejer").length === 1) {
+      return setFejl("Organisationen skal have mindst én ejer.");
+    }
+    if (!window.confirm(`Fjern ${m.email ?? "medlemmet"} fra ${org.name}?`)) return;
+
+    setVenter(m.user_id);
+    const { error } = await supabase
+      .from("org_members").delete().eq("org_id", org.id).eq("user_id", m.user_id);
+    setVenter("");
+    if (error) return setFejl(error.message);
+    visToast("Medlemmet er fjernet. Brugeren findes stadig, men har ingen adgang her.");
+    await hent();
+  }
+
+  return (
+    <>
+      <h1 style={styles.h1}>Medlemmer</h1>
+      <p style={styles.dæmpet}>{org.name}</p>
+
+      {fejl && <p style={styles.fejlBoks}>{fejl}</p>}
+
+      <div style={{ ...styles.toKolonner, marginTop: 16 }}>
+        <div style={styles.kort}>
+          <h2 style={styles.h2}>Hvem har adgang</h2>
+          {liste === null ? (
+            <p style={styles.dæmpet}><Loader2 size={15} /> Henter…</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>
+              {liste.map((m) => {
+                const migSelv = m.user_id === session.user.id;
+                return (
+                  <div key={m.user_id} style={styles.medlemsRaekke}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {m.name || m.email || m.user_id}
+                        {migSelv && <span style={styles.dæmpetLille}> · dig</span>}
+                      </div>
+                      {m.name && m.email && <div style={styles.dæmpetLille}>{m.email}</div>}
+                    </div>
+
+                    <select style={{ ...styles.input, width: "auto", fontSize: 12.5, padding: "5px 8px" }}
+                      value={m.rolle} disabled={venter === m.user_id}
+                      onChange={(e) => skiftRolle(m, e.target.value)}>
+                      {Object.entries(ROLLER).map(([id, mrk]) => (
+                        <option key={id} value={id}>{mrk}</option>
+                      ))}
+                    </select>
+
+                    <button style={styles.sletBtn} disabled={venter === m.user_id}
+                      onClick={() => fjern(m)} title="Fjern fra organisationen">
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+              {!liste.length && <p style={styles.dæmpet}>Ingen medlemmer. Det burde ikke kunne ske.</p>}
+            </div>
+          )}
+        </div>
+
+        <div style={styles.kort}>
+          <h2 style={styles.h2}>Invitér</h2>
+          <p style={styles.dæmpetLille}>
+            Findes brugeren allerede, får hun blot adgang. Ellers sender Supabase en
+            invitation på mail, og hun vælger selv sin adgangskode.
+          </p>
+
+          <div style={{ marginTop: 12 }}>
+            <Felt mrk="E-mail">
+              <input style={styles.input} type="email" autoComplete="off"
+                value={mail} onChange={(e) => setMail(e.target.value)}
+                placeholder="navn@firma.dk" />
+            </Felt>
+            <Felt mrk="Navn" hjaelp="Vises i listen. Kan udfyldes senere.">
+              <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)} />
+            </Felt>
+            <Felt mrk="Rolle" hjaelp={ROLLE_FORKLARING[nyRolle]}>
+              <select style={styles.input} value={nyRolle} onChange={(e) => setNyRolle(e.target.value)}>
+                {Object.entries(ROLLER).map(([id, mrk]) => (
+                  <option key={id} value={id}>{mrk}</option>
+                ))}
+              </select>
+            </Felt>
+
+            <button style={styles.primaryBtn} disabled={venter === "inviter"} onClick={inviter}>
+              {venter === "inviter" ? <><Loader2 size={14} /> Inviterer…</> : <><UserPlus size={14} /> Invitér</>}
+            </button>
+          </div>
+
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+            <div style={styles.dt}>Hvad rollerne må</div>
+            {Object.entries(ROLLE_FORKLARING).map(([id, tekst]) => (
+              <p key={id} style={{ margin: "7px 0 0", fontSize: 13 }}>
+                <strong>{ROLLER[id]}</strong> — <span style={{ color: "#64748B" }}>{tekst}</span>
+              </p>
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function Kunder({ kunder, brands, kanalerFor, orgId, rolle, valgt, setValgt, visToast, genindlaes }) {
   const [fane, setFane] = useState("stamkort");
   const [nytBrand, setNytBrand] = useState(false);
   const [nyKunde, setNyKunde] = useState(false);
@@ -2498,9 +2737,11 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
         <p style={styles.dæmpet}>
           Ingen kunder endnu. Kør <code>npm run db:setup</code>, eller opret en her.
         </p>
-        <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={() => setNyKunde(true)}>
-          <Plus size={15} /> Ny kunde
-        </button>
+        {rolle === "ejer" && (
+          <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={() => setNyKunde(true)}>
+            <Plus size={15} /> Ny kunde
+          </button>
+        )}
       </>
     );
   }
@@ -2516,13 +2757,15 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        <button style={styles.secondaryBtn} onClick={() => setNyKunde(true)}>
-          <Plus size={15} /> Ny kunde
-        </button>
+        {rolle === "ejer" && (
+          <button style={styles.secondaryBtn} onClick={() => setNyKunde(true)}>
+            <Plus size={15} /> Ny kunde
+          </button>
+        )}
       </div>
 
       {nyKunde && (
-        <Stamkort key="ny" kunde={null} visToast={visToast}
+        <Stamkort key="ny" kunde={null} orgId={orgId} visToast={visToast}
           genindlaes={async () => { setNyKunde(false); await genindlaes(); }}
           onAnnuller={() => setNyKunde(false)} />
       )}
@@ -2543,7 +2786,13 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
           </p>
 
           <div style={{ ...styles.faner, marginTop: 14 }}>
-            {[["stamkort", "Stamkort"], ["brands", `Brands og kanaler (${kundensBrands.length})`]]
+            {/* Stamkortet er aftalen og tokenet — det er ejerens. En
+                redaktør skal kunne se brands og tone of voice, ikke
+                Meta-opsætningen. */}
+            {[
+              ...(rolle === "ejer" ? [["stamkort", "Stamkort"]] : []),
+              ["brands", `Brands og kanaler (${kundensBrands.length})`],
+            ]
               .map(([id, mrk]) => (
                 <button key={id} style={fane === id ? styles.faneAktiv : styles.fane}
                   onClick={() => setFane(id)}>
@@ -2553,8 +2802,9 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
           </div>
 
           <div style={{ marginTop: 18 }}>
-            {fane === "stamkort" ? (
-              <Stamkort key={kunde.id} kunde={kunde} visToast={visToast} genindlaes={genindlaes} />
+            {fane === "stamkort" && rolle === "ejer" ? (
+              <Stamkort key={kunde.id} kunde={kunde} orgId={orgId}
+                visToast={visToast} genindlaes={genindlaes} />
             ) : (
               <>
                 <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
@@ -2563,7 +2813,7 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
                     er ikke tonen for erhvervsrengøring.
                   </p>
                   <div style={{ flex: 1 }} />
-                  {!nytBrand && (
+                  {!nytBrand && rolle === "ejer" && (
                     <button style={styles.secondaryBtn} onClick={() => setNytBrand(true)}>
                       <Plus size={15} /> Nyt brand
                     </button>
@@ -2573,7 +2823,7 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                   {kundensBrands.map((b) => (
                     <BrandBlok key={b.id} brand={b} kunde={kunde} kunder={kunder}
-                      soeskende={kundensBrands}
+                      soeskende={kundensBrands} rolle={rolle}
                       kanaler={kanalerFor(b.id)} visToast={visToast} genindlaes={genindlaes} />
                   ))}
 
@@ -2605,7 +2855,7 @@ function Kunder({ kunder, brands, kanalerFor, valgt, setValgt, visToast, genindl
    i samme Business-portefølje.
    --------------------------------------------------------------------- */
 
-function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
+function Stamkort({ kunde, orgId, visToast, genindlaes, onAnnuller }) {
   const tom = {
     name: "", kontakt_navn: "", kontakt_mail: "", kontakt_telefon: "",
     aftale: "", godkender: "", meta_portefoelje_id: "", meta_systembruger: "",
@@ -2622,7 +2872,11 @@ function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
 
   async function gem() {
     setVenter("gem");
-    const svar = await kaldApi("gem-kunde", { kundeId: kunde?.id, ...felter, token });
+    // orgId skal med når kunden er ny: funktionen kan ikke gætte hvilken
+    // organisation hun skal ligge i, hvis du er med i flere.
+    const svar = await kaldApi("gem-kunde", {
+      kundeId: kunde?.id, orgId: kunde ? undefined : orgId, ...felter, token,
+    });
     setVenter("");
     if (!svar.ok) return visToast(svar.fejl, false);
     visToast(svar.besked);
@@ -2858,7 +3112,8 @@ function Stamkort({ kunde, visToast, genindlaes, onAnnuller }) {
    Ét brand med sine kanaler
    --------------------------------------------------------------------- */
 
-function BrandBlok({ brand, kunde, kunder, soeskende = [], kanaler, visToast, genindlaes }) {
+function BrandBlok({ brand, kunde, kunder, soeskende = [], rolle, kanaler, visToast, genindlaes }) {
+  const erEjer = rolle === "ejer";
   const [aaben, setAaben] = useState(false);
   const [nyKanal, setNyKanal] = useState(false);
   const [flytter, setFlytter] = useState(false);
@@ -2943,7 +3198,7 @@ function BrandBlok({ brand, kunde, kunder, soeskende = [], kanaler, visToast, ge
           </div>
         </div>
         <div style={{ flex: 1 }} />
-        {kunder?.length > 1 && (
+        {erEjer && kunder?.length > 1 && (
           <select style={{ ...styles.input, width: "auto", fontSize: 12.5, padding: "5px 8px" }}
             value={brand.customer_id ?? ""} disabled={flytter}
             onChange={(e) => flytTil(e.target.value)}
@@ -2951,7 +3206,7 @@ function BrandBlok({ brand, kunde, kunder, soeskende = [], kanaler, visToast, ge
             {kunder.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
           </select>
         )}
-        {tomt && (
+        {erEjer && tomt && (
           <button style={styles.sletBtn} disabled={sletter} onClick={slet}
             title="Sletter brandet, hvis det hverken har kanaler eller kampagner">
             <Trash2 size={13} /> {sletter ? "Tjekker…" : "Slet"}
@@ -2971,7 +3226,9 @@ function BrandBlok({ brand, kunde, kunder, soeskende = [], kanaler, visToast, ge
               <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
                 <h2 style={{ ...styles.h2, margin: 0 }}>Kanaler</h2>
                 <div style={{ flex: 1 }} />
-                {!nyKanal && (
+                {/* Kanalen bærer et token og peger på en rigtig side.
+                    Derfor ejer, ikke redaktør — det samme siger basen. */}
+                {!nyKanal && erEjer && (
                   <button style={styles.secondaryBtn} onClick={() => setNyKanal(true)}>
                     <Plus size={14} /> Tilføj
                   </button>
@@ -2981,7 +3238,7 @@ function BrandBlok({ brand, kunde, kunder, soeskende = [], kanaler, visToast, ge
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {kanaler.map((k) => (
                   <KanalKort key={k.id} kanal={k} brandId={brand.id} kunde={kunde}
-                    soeskende={soeskende}
+                    soeskende={soeskende} laesekun={!erEjer}
                     visToast={visToast} genindlaes={genindlaes} />
                 ))}
                 {nyKanal && (
@@ -3118,7 +3375,7 @@ function Brandprofil({ brand, visToast, genindlaes }) {
   );
 }
 
-function KanalKort({ kanal, brandId, kunde, soeskende = [], visToast, genindlaes }) {
+function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, visToast, genindlaes }) {
   const [platform, setPlatform] = useState(kanal?.platform ?? "facebook");
   const [visningsnavn, setVisningsnavn] = useState(kanal?.display_name ?? "");
   const [pageId, setPageId] = useState(kanal?.page_id ?? "");
@@ -3172,6 +3429,29 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], visToast, genindlaes
     setVenter("");
     visToast(svar.ok ? svar.besked : (svar.besked ?? svar.fejl), svar.ok);
     await genindlaes();
+  }
+
+  // En redaktør må se hvilke kanaler der findes — hun skal kunne vælge dem
+  // på en kampagne — men ikke røre dem. Felterne slås fra frem for at skjules,
+  // så det er tydeligt HVAD hun ikke må, og ikke bare mangler.
+  if (laesekun) {
+    return (
+      <div style={styles.kort}>
+        <div style={{ fontWeight: 600, fontSize: 14 }}>
+          {PLATFORM[platform]} · {visningsnavn || "uden navn"}
+        </div>
+        <div style={styles.dæmpetLille}>
+          {aktiv ? "Aktiv" : "Inaktiv"}
+          {kanal?.last_error
+            ? " · sidste test fejlede"
+            : kanal?.last_verified_at ? " · bekræftet" : " · ikke testet"}
+        </div>
+        <p style={styles.dæmpetLille}>
+          Kun en ejer kan rette en kanal. Den peger på en rigtig side og bærer
+          adgangen til at publicere.
+        </p>
+      </div>
+    );
   }
 
   return (
@@ -3269,6 +3549,20 @@ const styles = {
   // Ikonet har sin egen afrundede baggrund, så her skal kun størrelsen sættes.
   brandMark: { width: 36, height: 36, borderRadius: 10, display: "block" },
   brandTitle: { fontWeight: 600, fontSize: 16 },
+
+  // Organisationen står i topbjælken, ikke i en menu: man skal kunne se
+  // hvem man arbejder for uden at klikke, ellers retter man den forkerte
+  // kundes kampagne.
+  orgVaelger: { marginLeft: 14, background: "#1E1E1E", color: "#fff",
+    border: "1px solid #3A3A3A", borderRadius: 8, padding: "6px 9px",
+    fontSize: 13, fontFamily: "inherit", maxWidth: 220 },
+  orgNavn: { marginLeft: 14, fontSize: 13, color: "#C7D6FB" },
+  rolleMaerkat: { marginLeft: 8, fontSize: 11, textTransform: "uppercase",
+    letterSpacing: "0.06em", color: "#9BB4F5", border: "1px solid #33406B",
+    borderRadius: 999, padding: "2px 8px" },
+
+  medlemsRaekke: { display: "flex", alignItems: "center", gap: 10,
+    padding: "9px 11px", background: "#F8FAFF", borderRadius: 9 },
   brandSub: { fontSize: 12, color: "#9BB4F5" },
   nav: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" },
   navBtn: { padding: "8px 13px", borderRadius: 8, border: "none", background: "transparent",

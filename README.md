@@ -83,20 +83,63 @@ opslag følger med, for de hænger på brandet.
 
 ## Adgang
 
-Ét niveau: administrator. Står din bruger i `app_admins`, kan du alt. Gør den
-ikke, kan du ingenting — og det er håndhævet i databasen, ikke i
-skærmbilledet. Funktionerne kører med service-role og tjekker derfor selv
-`app_admins`, så et POST med curl falder på samme sten som en uautoriseret
-bruger i browseren.
+Adgang er **medlemskab af en organisation, med en rolle** — ikke én global
+liste over folk der kan alt. Det er det der gør at to kunder kan bo i samme
+base uden at kunne se hinanden.
 
-```bash
-npm run admin:add din@mail.dk      # gør en eksisterende bruger administrator
-npm run admin:list                 # hvem har adgang
-npm run admin:remove din@mail.dk   # fjern igen
+```
+organisation → kunde → brand → kanal
 ```
 
+Organisationen er den der har et abonnement og nogle brugere. Kunden er den
+organisationen laver opslag for. For Jammerbugt er de to det samme; for et
+bureau ligger der flere kunder under én organisation.
+
+| Rolle | Må |
+|---|---|
+| `ejer` | Alt: kunder, Meta-tokens, medlemmer, publicering |
+| `redaktoer` | Kampagner, opslag og billeder. Ikke tokens, ikke medlemmer |
+| `godkender` | Se alt, og kun sætte et opslag til godkendt eller afvist |
+
+Godkenderen er rollen kunden selv kan få: hun kan godkende sine egne opslag
+uden at kunne se andre kunder — og uden at kunne omskrive teksten og godkende
+sin egen version. Det sidste er en trigger på `posts`, for en RLS-politik kan
+ikke se hvilke felter der ændrede sig.
+
+Det hele håndhæves i databasen. Fem små funktioner afgør alt —
+`har_org_adgang`, `kan_redigere`, `er_ejer`, `org_for_brand` og
+`has_brand_access` — og politikkerne kalder kun dem. Skal modellen ændres,
+ændres funktionerne, ikke fyrre politikker. Netlify-funktionerne kører med
+secret key og går uden om RLS, så de spørger selv gennem `kraevOrgRolle()`;
+ellers var en redaktør reelt ejer så snart hun kaldte API'et med curl.
+
+### Fra terminalen
+
+```bash
+npm run org                                  # organisationer, kunder og medlemmer
+npm run org:opret "PGU"                      # ny organisation
+npm run org:medlem pgu jonn@mail.dk ejer     # giv adgang, eller ret rollen
+npm run org:fjern pgu jonn@mail.dk           # fjern adgangen
+```
+
+Den første ejer i en ny organisation *skal* laves fra terminalen — der er
+ingen ejer endnu til at invitere hende. Derefter foregår det i appen under
+**Medlemmer**, hvor en ejer kan invitere på mail.
+
+`npm run admin:add` virker stadig og betyder nu "gør til ejer", men den nægter
+at gætte hvis der findes mere end én organisation.
+
 Brugere oprettes i Supabase-dashboardet under **Authentication → Users → Add
-user**. Adgangskoder hører ikke i et script.
+user**, eller inviteres fra appen. Adgangskoder hører ikke i et script.
+
+### En fælde det er værd at kende
+
+En almindelig visning i Postgres kører med **ejerens** rettigheder og går
+derfor uden om RLS. `kanal_med_token` udleverede alle kunders tokens til
+enhver der var logget ind — det kunne ikke ses ved at læse politikkerne, kun
+ved at prøve. Migration 0005 sætter `security_invoker = on` på visningerne, og
+`supabase/tests/adskillelse.sql` holder øje med at det bliver ved at være
+sådan.
 
 ---
 
@@ -259,10 +302,23 @@ Facebook eller Instagram.
 ## Test
 
 ```bash
-npm run test:publicering   # kryptering, tørkørsel, Instagram-regler — intet netværk
+npm test                   # kryptering, tørkørsel, kanalregler, omskrivning — intet netværk
 npm run lint
 npm run build
 ```
+
+Og den vigtigste, hvis løsningen skal sælges til flere kunder:
+
+```bash
+# en engangsbase, ALDRIG produktion
+docker run --rm -p 5433:5432 -e POSTGRES_PASSWORD=test postgres:16
+TEST_DATABASE_URL=postgres://postgres:test@localhost:5433/postgres npm run test:adskillelse
+```
+
+Den bygger basen op fra migrationerne og prøver derefter at bryde ind: en
+bruger hos den ene kunde forsøger at læse og skrive den andens kunder, brands,
+kanaler, tokens, kampagner, opslag og filer. 29 kontroller, og de skal alle
+afvises af basen. Den fangede en rigtig fejl den første gang den kørte.
 
 `test:publicering` kaprer `fetch` under tørkørsel-testen, så testen fejler hvis
 koden alligevel prøver at ringe til Meta.

@@ -1,5 +1,5 @@
 import { publicerOpslag } from './_lib/meta.js'
-import { jsonSvar, kraevAdmin, tørkørsel } from './_lib/supabase.js'
+import { adminKlient, jsonSvar, kraevOrgRolle, tørkørsel } from './_lib/supabase.js'
 
 /**
  * POST /api/publicer-opslag  { opslagId }
@@ -9,11 +9,18 @@ import { jsonSvar, kraevAdmin, tørkørsel } from './_lib/supabase.js'
  * Tokens dekrypteres her på serveren. Browseren ser dem aldrig, hverken
  * krypteret eller i klartekst.
  */
+/** Hvilken organisation hører opslaget under? */
+async function orgForOpslag(opslagId) {
+  const { data } = await adminKlient()
+    .from('posts')
+    .select('brands(customers(organisation_id))')
+    .eq('id', opslagId)
+    .maybeSingle()
+  return data?.brands?.customers?.organisation_id ?? null
+}
+
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
-
-  const adgang = await kraevAdmin(req)
-  if (!adgang.ok) return adgang.svar
 
   let krop
   try {
@@ -23,6 +30,16 @@ export default async function handler(req) {
   }
 
   if (!krop?.opslagId) return jsonSvar({ fejl: 'opslagId mangler.' }, 400)
+
+  // Publicering er det uigenkaldelige skridt: opslaget går ud på en rigtig
+  // side og kan ikke kaldes tilbage herfra. Derfor ejer — og organisationen
+  // udledes af opslaget, så man ikke kan publicere i en fremmed kunde ved at
+  // sende et andet orgId med.
+  const adgang = await kraevOrgRolle(req, {
+    roller: ['ejer'],
+    orgId: await orgForOpslag(krop.opslagId),
+  })
+  if (!adgang.ok) return adgang.svar
 
   try {
     const resultater = await publicerOpslag(adgang.klient, krop.opslagId)
