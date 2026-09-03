@@ -21,6 +21,28 @@ import { laesEnv } from './lib/mgmt.mjs'
 const ROLLER = ['ejer', 'redaktoer', 'godkender']
 const env = { ...laesEnv(), ...process.env }
 
+/**
+ * Oversætter de to fejl man reelt møder, til noget der siger hvad man skal.
+ *
+ * PostgREST svarer "Could not find the table ... in the schema cache" både
+ * når tabellen ikke findes, OG i op til et minut efter at den er lavet.
+ * Beskeden ligner en kodefejl og er næsten altid en manglende migration.
+ */
+function oversaetFejl(error) {
+  const t = `${error?.message ?? ''} ${error?.code ?? ''}`
+  if (/organisations|org_members/.test(t) && /schema cache|42P01|does not exist/.test(t)) {
+    return new Error(
+      'Tabellen organisations findes ikke i databasen endnu.\n\n' +
+        'Migration 0005 mangler. Kør:\n' +
+        '  export SUPABASE_ACCESS_TOKEN=sbp_...   (fra supabase.com/dashboard/account/tokens)\n' +
+        '  npm run db:setup\n\n' +
+        'Har du netop kørt den, så vent et halvt minut: Supabases API-lag holder\n' +
+        'et cachet billede af skemaet, og det er den samme fejlbesked.',
+    )
+  }
+  return new Error(error?.message ?? 'Ukendt databasefejl.')
+}
+
 function klient() {
   const url = env.SUPABASE_URL || env.VITE_SUPABASE_URL
   const noegle = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY
@@ -54,7 +76,7 @@ async function findBruger(db, email) {
 /** Finder organisationen ud fra slug, navn eller id — det man nu har ved hånden. */
 async function findOrg(db, noegle) {
   const { data, error } = await db.from('organisations').select('id, slug, name')
-  if (error) throw new Error(error.message)
+  if (error) throw oversaetFejl(error)
 
   const norm = (s) => String(s).toLowerCase().replace(/[\s_-]+/g, '')
   const traef = (data ?? []).filter(
@@ -86,7 +108,7 @@ function lavSlug(navn) {
 async function visAlt(db) {
   const { data: orgs, error } = await db
     .from('organisations').select('*').order('name')
-  if (error) throw new Error(error.message)
+  if (error) throw oversaetFejl(error)
 
   if (!orgs?.length) {
     console.log('Ingen organisationer. Opret den første:\n  npm run org:opret "Jammerbugt Rengøring"')
@@ -138,15 +160,33 @@ async function opret(db, navn) {
     sidste = error
     if (error.code !== '23505') break
   }
-  throw new Error(sidste?.message ?? 'Kunne ikke oprette organisationen.')
+  throw oversaetFejl(sidste ?? { message: 'Kunne ikke oprette organisationen.' })
 }
 
 async function medlem(db, orgNoegle, email, rolle = 'redaktoer') {
   if (!orgNoegle || !email) {
-    throw new Error('Brug: npm run org:medlem <organisation> <e-mail> [ejer|redaktoer|godkender]')
+    throw new Error(
+      'Brug: npm run org:medlem <organisation> <e-mail> [ejer|redaktoer|godkender]\n\n' +
+        'Organisationen skrives som dens slug, uden vinkelparenteser — se dem med\n' +
+        '  npm run org\n' +
+        'Skriv "alle" i stedet for et slug for at give adgang til dem alle.',
+    )
   }
   if (!ROLLER.includes(rolle)) {
     throw new Error(`Ukendt rolle "${rolle}". Vælg: ${ROLLER.join(', ')}.`)
+  }
+
+  // "alle" findes fordi det er det man reelt gør for sit eget hold: én
+  // person skal typisk have samme rolle i hver organisation man driver.
+  // Til en kunde skriver man ét slug — og skal gøre det bevidst.
+  if (orgNoegle === 'alle') {
+    const { data: orgs, error } = await db.from('organisations').select('slug').order('name')
+    if (error) throw oversaetFejl(error)
+    if (!orgs?.length) throw new Error('Der findes ingen organisationer endnu.')
+
+    console.log(`Giver ${email} rollen ${rolle} i alle ${orgs.length} organisationer.`)
+    for (const o of orgs) await medlem(db, o.slug, email, rolle)
+    return
   }
 
   const org = await findOrg(db, orgNoegle)
