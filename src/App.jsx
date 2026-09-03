@@ -3423,6 +3423,59 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
     await genindlaes();
   }
 
+  /**
+   * Sletter kanalen.
+   *
+   * Kanalen er ikke bare en række: post_targets peger på den med cascade, så
+   * hvert opslag der skulle ud på kanalen mister sit mål. Derfor tælles der
+   * op først, og publicerede mål er en hård stopklods — de er kvitteringen
+   * for noget der ligger ude på en rigtig side, og den historik skal ikke
+   * forsvinde fordi man rydder op i en dublet.
+   *
+   * Skal kanalen bare ud af vejen, er "Aktiv" fluebenet det rigtige valg.
+   */
+  async function slet() {
+    setVenter("slet");
+
+    const { data: maal } = await supabase
+      .from("post_targets").select("id, status").eq("channel_id", kanal.id);
+
+    const publicerede = (maal ?? []).filter((m) => m.status === "published").length;
+    setVenter("");
+
+    if (publicerede) {
+      return visToast(
+        `${visningsnavn} har ${publicerede} publiceret opslag. Kanalen kan ikke slettes — ` +
+        "fjern fluebenet ved Aktiv i stedet, så bliver historikken stående.", false,
+      );
+    }
+
+    const antal = maal?.length ?? 0;
+    if (!window.confirm(
+      `Slet kanalen "${visningsnavn}"?\n\n` +
+      (antal
+        ? `${antal} planlagte opslag mister denne kanal som mål. Teksterne bliver, ` +
+          "men de skal have en ny kanal sat på.\n\n"
+        : "Ingen opslag bruger den.\n\n") +
+      "Kan ikke fortrydes.",
+    )) return;
+
+    setVenter("slet");
+    const { error } = await supabase.from("channels").delete().eq("id", kanal.id);
+    setVenter("");
+
+    if (error) {
+      return visToast(
+        error.message.includes("row-level security")
+          ? "Kun en ejer kan slette en kanal."
+          : error.message,
+        false,
+      );
+    }
+    visToast(`${visningsnavn} er slettet.`);
+    await genindlaes();
+  }
+
   async function test() {
     setVenter("test");
     const svar = await kaldApi("gem-kanal", { handling: "test", kanalId: kanal.id });
@@ -3528,6 +3581,13 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
         {kanal && (
           <button style={styles.secondaryBtn} disabled={!!venter} onClick={test}>
             {venter === "test" ? <><Loader2 size={14} /> Tester…</> : "Test forbindelse"}
+          </button>
+        )}
+        {kanal && <div style={{ flex: 1 }} />}
+        {kanal && (
+          <button style={styles.sletBtn} disabled={!!venter} onClick={slet}
+            title="Sletter kanalen. Nægter hvis der er publiceret på den.">
+            <Trash2 size={13} /> {venter === "slet" ? "Tjekker…" : "Slet kanal"}
           </button>
         )}
       </div>
