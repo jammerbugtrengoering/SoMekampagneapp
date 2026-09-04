@@ -38,6 +38,39 @@ const PLATFORM = { facebook: "Facebook", instagram: "Instagram", linkedin: "Link
 const PLATFORM_KORT = { facebook: "FB", instagram: "IG", linkedin: "LI" };
 
 const UGEDAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
+const UGEDAGE_LANG = ["mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag"];
+
+/**
+ * Er vi på en lille skærm?
+ *
+ * Appen bruger inline styles hele vejen — samme mønster som de andre apps —
+ * og inline styles kan ikke bære en media query. Derfor spørges der i stedet
+ * i JavaScript, og komponenterne vælger selv layout. Det er også mere end en
+ * ombrydning: kalenderen skifter helt form på en telefon, og det kan CSS
+ * alligevel ikke klare alene.
+ *
+ * 760 px er valgt fordi det er dér de syv kalenderkolonner holder op med at
+ * kunne rumme et klokkeslæt og et par ord.
+ *
+ * Navnet er engelsk midt i en dansk kodebase, fordi React kræver at hooks
+ * hedder useNoget for at kunne kontrollere at de kaldes rigtigt. Det er
+ * værktøjets regel, ikke en smagssag.
+ */
+function useMobil(graense = 760) {
+  const [mobil, setMobil] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < graense,
+  );
+
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${graense - 1}px)`);
+    const lyt = (e) => setMobil(e.matches);
+    setMobil(mq.matches);
+    mq.addEventListener("change", lyt);
+    return () => mq.removeEventListener("change", lyt);
+  }, [graense]);
+
+  return mobil;
+}
 
 // Rollerne som de hedder i basen, og som de skal læses af et menneske.
 const ROLLER = { ejer: "Ejer", redaktoer: "Redaktør", godkender: "Godkender" };
@@ -295,6 +328,7 @@ function VaelgAdgangskode({ onFaerdig }) {
 function Kampagneapp({ session, onLogUd }) {
   // null betyder "ved det ikke endnu". Tom liste betyder "ingen adgang", og
   // de to skal ikke se ens på skærmen.
+  const mobil = useMobil();
   const [orgs, setOrgs] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [side, setSide] = useState("kalender");
@@ -439,36 +473,40 @@ function Kampagneapp({ session, onLogUd }) {
 
   return (
     <div style={styles.app}>
-      <header style={styles.header}>
-        <div style={styles.brand}>
+      <header style={mobil ? styles.headerMobil : styles.header}>
+        <div style={mobil ? styles.brandMobil : styles.brand}>
           {/* Samme mærke som i browserfanen — hentes fra public/, så ikonet
               kun findes ét sted og ikke skal rettes to. */}
           <img src="/favicon.svg" alt="" style={styles.brandMark} />
-          <div>
+          <div style={{ minWidth: 0, flex: mobil ? 1 : "initial" }}>
             <div style={styles.brandTitle}>Kampagner</div>
+            {/* På telefonen fylder tællingen en linje uden at nogen har brug
+                for den — organisationen og rollen er det man skal kunne se. */}
             <div style={styles.brandSub}>
-              {kunder.length} kunder · {brands.length} brands · {opslag.length} opslag
+              {mobil
+                ? `${org?.name ?? ""}${rolle ? ` · ${(ROLLER[rolle] ?? rolle).toLowerCase()}` : ""}`
+                : `${kunder.length} kunder · ${brands.length} brands · ${opslag.length} opslag`}
             </div>
           </div>
 
           {/* Er man kun med i én organisation, er en vælger med ét valg
               bare støj — så står navnet der som en oplysning. */}
           {orgs.length > 1 ? (
-            <select style={styles.orgVaelger} value={orgId ?? ""}
+            <select style={mobil ? styles.orgVaelgerMobil : styles.orgVaelger} value={orgId ?? ""}
               onChange={(e) => { setOrgId(e.target.value); setValgtKampagne(null); setValgtKunde(null); }}
               title="Skift organisation">
               {orgs.map((o) => (
                 <option key={o.id} value={o.id}>{o.name}</option>
               ))}
             </select>
-          ) : (
+          ) : !mobil && (
             <span style={styles.orgNavn}>{org?.name}</span>
           )}
 
-          <span style={styles.rolleMaerkat}>{ROLLER[rolle] ?? rolle}</span>
+          {!mobil && <span style={styles.rolleMaerkat}>{ROLLER[rolle] ?? rolle}</span>}
         </div>
 
-        <nav style={styles.nav}>
+        <nav style={mobil ? styles.navMobil : styles.nav}>
           {[
             ["kalender", "Kalender", Calendar, true],
             ["ny", "Ny kampagne", Sparkles, kanRedigere],
@@ -503,13 +541,13 @@ function Kampagneapp({ session, onLogUd }) {
         </div>
       )}
 
-      <main style={styles.page}>
+      <main style={mobil ? styles.pageMobil : styles.page}>
         {henter ? (
           <p style={styles.dæmpet}><Loader2 size={15} style={{ verticalAlign: -2 }} /> Henter data…</p>
         ) : visSide === "kalender" ? (
           <Kalender
             maaned={maaned} setMaaned={setMaaned} opslag={opslag} brands={brands}
-            kanaler={kanaler}
+            kanaler={kanaler} mobil={mobil}
             aabnKampagne={(id) => { setValgtKampagne(id); setSide("kampagner"); }}
             gaaTilNy={() => setSide("ny")}
           />
@@ -548,7 +586,7 @@ function Kampagneapp({ session, onLogUd }) {
    Kalender
    ===================================================================== */
 
-function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, gaaTilNy }) {
+function Kalender({ maaned, setMaaned, opslag, brands, kanaler, mobil, aabnKampagne, gaaTilNy }) {
   const [aar, m] = maaned.split("-").map(Number);
 
   const celler = useMemo(() => {
@@ -573,6 +611,12 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, ga
     return ud[35].iMaaned ? ud : ud.slice(0, 35);
   }, [aar, m, opslag]);
 
+  // Til dagslisten på telefonen: kun de dage i måneden der har noget i.
+  const dageMedOpslag = useMemo(
+    () => celler.filter((c) => c.iMaaned && c.liste.length),
+    [celler],
+  );
+
   const iDag = datoNoegle(new Date());
   const afventer = opslag.filter((o) => o.status === "needs_approval").length;
   const udenBillede = opslag.filter(manglerBillede).length;
@@ -585,19 +629,30 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, ga
   return (
     <>
       <div style={styles.toolbar}>
-        <div style={styles.vaerktoejNav}>
+        {/* Den faste bredde på månedsnavnet holder pilene i ro på en skærm.
+            På en telefon skubber den siden bredere end vinduet, og så kan
+            hele appen svippes sidelæns — derfor flyder den der. */}
+        <div style={{ ...styles.vaerktoejNav, flex: mobil ? 1 : "initial" }}>
           <button style={styles.ikonBtn} onClick={() => setMaaned(flytMaaned(maaned, -1))}>
             <ChevronLeft size={16} />
           </button>
-          <span style={{ ...styles.h1, textTransform: "capitalize", minWidth: 180, textAlign: "center" }}>
+          <span style={{
+            ...styles.h1,
+            textTransform: "capitalize",
+            fontSize: mobil ? 18 : 24,
+            minWidth: mobil ? 0 : 180,
+            flex: mobil ? 1 : "initial",
+            textAlign: "center",
+          }}>
             {titel}
           </span>
           <button style={styles.ikonBtn} onClick={() => setMaaned(flytMaaned(maaned, 1))}>
             <ChevronRight size={16} />
           </button>
         </div>
-        <div style={{ flex: 1 }} />
-        <button style={styles.primaryBtn} onClick={gaaTilNy}>
+        {!mobil && <div style={{ flex: 1 }} />}
+        <button style={{ ...styles.primaryBtn, ...(mobil ? { width: "100%", justifyContent: "center" } : null) }}
+          onClick={gaaTilNy}>
           <Plus size={15} /> Ny kampagne
         </button>
       </div>
@@ -609,6 +664,57 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, ga
         <Nøgletal mrk="Kanaler uden test" tal={utestede} advarsel={utestede > 0} />
       </div>
 
+      {/* Telefon: syv kolonner på 390 px giver et klokkeslæt og tre bogstaver.
+          Derfor en dagsliste i stedet — samme data, læsbar form. Kun dage med
+          noget i, for tomme dage er ikke information på en lille skærm. */}
+      {mobil ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {dageMedOpslag.length === 0 && (
+            <p style={styles.dæmpet}>Ingen opslag i {titel}.</p>
+          )}
+
+          {dageMedOpslag.map(({ dato, liste }) => {
+            const n = datoNoegle(dato);
+            return (
+              <div key={n} style={styles.agendaDag}>
+                <div style={styles.agendaHoved}>
+                  <span style={n === iDag ? styles.kalDagIdag : undefined}>
+                    {dato.getDate()}.
+                  </span>
+                  <span style={{ marginLeft: 7 }}>
+                    {UGEDAGE_LANG[(dato.getDay() + 6) % 7]}
+                  </span>
+                  {n === iDag && <span style={styles.dæmpetLille}> · i dag</span>}
+                </div>
+
+                {liste.map((o) => {
+                  const farve = brands.find((b) => b.id === o.brand_id)?.colors?.primary ?? "#64748B";
+                  const st = STATUS[o.status] ?? STATUS.draft;
+                  return (
+                    <button key={o.id} style={{ ...styles.agendaOpslag, borderLeft: `3px solid ${farve}` }}
+                      onClick={() => o.campaign_id && aabnKampagne(o.campaign_id)}>
+                      <div style={styles.agendaTid}>
+                        {new Date(o.scheduled_at).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" })}
+                        {" · "}
+                        {(o.maal ?? []).map((mm) => PLATFORM_KORT[mm.platform]).join(" ") || "ingen kanal"}
+                      </div>
+                      <div style={styles.agendaTekst}>{o.body.split("\n")[0]}</div>
+                      <div style={{ marginTop: 5 }}>
+                        <span style={{ ...styles.mærkat, background: st.bg, color: st.fg }}>{st.navn}</span>
+                        {manglerBillede(o) && (
+                          <span style={{ ...styles.mærkat, background: "#FEE2E2", color: "#991B1B", marginLeft: 4 }}>
+                            uden billede
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
       <div style={styles.kalender}>
         <div style={styles.kalHoved}>
           {UGEDAGE.map((d) => <div key={d} style={styles.kalHovedCelle}>{d}</div>)}
@@ -677,6 +783,7 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, aabnKampagne, ga
           })}
         </div>
       </div>
+      )}
 
       <div style={styles.forklaring}>
         {brands.map((b) => (
@@ -1268,6 +1375,7 @@ function RetKampagne({
   kampagne, liste, brand, kanaler, brands = [], kunder = [], kanalerFor = () => [],
   visToast, genindlaes, onLuk,
 }) {
+  const mobil = useMobil();
   const [tilstand, setTilstand] = useState("felter");
   const [medGodkendte, setMedGodkendte] = useState(false);
   const [venter, setVenter] = useState(false);
@@ -1665,8 +1773,9 @@ function RetKampagne({
   const roererOpslag = tilstand !== "felter" && tilstand !== "flytbrand";
 
   return (
-    <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
-      <div style={{ ...styles.dialog, maxWidth: 880 }}>
+    <div style={mobil ? styles.overlayMobil : styles.overlay}
+      onClick={(e) => { if (!mobil && e.target === e.currentTarget) onLuk(); }}>
+      <div style={mobil ? styles.dialogMobil : { ...styles.dialog, maxWidth: 880 }}>
         <div style={styles.dialogHoved}>
           <h2 style={{ ...styles.h2, margin: 0 }}>Ret kampagnen</h2>
           <span style={styles.dæmpetLille}>{kampagne.name}</span>
@@ -1674,7 +1783,7 @@ function RetKampagne({
           <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
         </div>
 
-        <div style={styles.faner}>
+        <div style={mobil ? styles.fanerMobil : styles.faner}>
           {TILSTANDE.map(([id, mrk]) => (
             <button key={id} style={tilstand === id ? styles.faneAktiv : styles.fane}
               onClick={() => { setTilstand(id); setPrompt(""); setSvar(""); setFejl(""); }}>
@@ -1683,7 +1792,7 @@ function RetKampagne({
           ))}
         </div>
 
-        <div style={styles.dialogKrop}>
+        <div style={mobil ? styles.dialogKropMobil : styles.dialogKrop}>
           {roererOpslag && (
             <div style={styles.omfang}>
               <div style={styles.dt}>Det her rører</div>
@@ -2006,6 +2115,7 @@ function RetKampagne({
    ===================================================================== */
 
 function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
+  const mobil = useMobil();
   const [index, setIndex] = useState(startIndex);
   const [visning, setVisning] = useState("mobil");
   const opslag = liste[index];
@@ -2069,8 +2179,9 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
     || brand?.name || "Din side";
 
   return (
-    <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
-      <div style={{ ...styles.dialog, maxWidth: 940 }}>
+    <div style={mobil ? styles.overlayMobil : styles.overlay}
+      onClick={(e) => { if (!mobil && e.target === e.currentTarget) onLuk(); }}>
+      <div style={mobil ? styles.dialogMobil : { ...styles.dialog, maxWidth: 940 }}>
         <div style={styles.dialogHoved}>
           <h2 style={{ ...styles.h2, margin: 0 }}>Forhåndsvisning</h2>
           <span style={styles.dæmpetLille}>
@@ -2086,7 +2197,7 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
           <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
         </div>
 
-        <div style={styles.faner}>
+        <div style={mobil ? styles.fanerMobil : styles.faner}>
           {platforme.map((p) => (
             <button key={p} style={platform === p ? styles.faneAktiv : styles.fane}
               onClick={() => setPlatform(p)}>
@@ -2102,7 +2213,7 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
           ))}
         </div>
 
-        <div style={styles.dialogKrop}>
+        <div style={mobil ? styles.dialogKropMobil : styles.dialogKrop}>
           <div style={styles.toKolonner}>
             {/* ---- Feed-attrappen ---- */}
             <div style={{ maxWidth: visning === "mobil" ? 400 : "100%", margin: "0 auto", width: "100%" }}>
@@ -2234,6 +2345,7 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
    ===================================================================== */
 
 function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
+  const mobil = useMobil();
   const [fane, setFane] = useState("arkiv");
   const [arkiv, setArkiv] = useState([]);
   const [henter, setHenter] = useState(true);
@@ -2285,15 +2397,16 @@ function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
   ];
 
   return (
-    <div style={styles.overlay} onClick={(e) => { if (e.target === e.currentTarget) onLuk(); }}>
-      <div style={styles.dialog}>
+    <div style={mobil ? styles.overlayMobil : styles.overlay}
+      onClick={(e) => { if (!mobil && e.target === e.currentTarget) onLuk(); }}>
+      <div style={mobil ? styles.dialogMobil : styles.dialog}>
         <div style={styles.dialogHoved}>
           <h2 style={{ ...styles.h2, margin: 0 }}>Billede til opslaget</h2>
           <div style={{ flex: 1 }} />
           <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
         </div>
 
-        <div style={styles.faner}>
+        <div style={mobil ? styles.fanerMobil : styles.faner}>
           {faner.map(([id, mrk]) => (
             <button key={id} style={fane === id ? styles.faneAktiv : styles.fane}
               onClick={() => { setFane(id); setFejl(""); }}>
@@ -2302,7 +2415,7 @@ function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
           ))}
         </div>
 
-        <div style={styles.dialogKrop}>
+        <div style={mobil ? styles.dialogKropMobil : styles.dialogKrop}>
           {fejl && <p style={styles.fejlBoks}>{fejl}</p>}
 
           {fane === "arkiv" && (
@@ -3601,7 +3714,10 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
    ===================================================================== */
 
 const styles = {
-  app: { background: "#F4F6FC", minHeight: "100vh", color: "#111111", display: "flex", flexDirection: "column" },
+  // overflowX: hidden er et sikkerhedsnet: kommer der én gang et element der
+  // er bredere end skærmen, skal hele appen ikke kunne svippes sidelæns.
+  app: { background: "#F4F6FC", minHeight: "100vh", color: "#111111", display: "flex",
+    flexDirection: "column", overflowX: "hidden" },
 
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 24px",
     background: "#111111", color: "#fff", flexWrap: "wrap", gap: 12, position: "sticky", top: 0, zIndex: 100 },
@@ -3636,6 +3752,30 @@ const styles = {
     fontSize: 13.5, zIndex: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.22)", maxWidth: 460 },
 
   page: { padding: "20px 24px 60px", flex: 1, maxWidth: 1180, width: "100%", margin: "0 auto" },
+  pageMobil: { padding: "14px 12px 80px", flex: 1, width: "100%" },
+
+  // Telefon: to rækker i stedet for én. Navigationen ruller vandret frem for
+  // at brydes om i tre linjer, som åd en tredjedel af skærmen.
+  headerMobil: { display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px",
+    background: "#111111", color: "#fff", position: "sticky", top: 0, zIndex: 100 },
+  brandMobil: { display: "flex", alignItems: "center", gap: 10, minWidth: 0 },
+  navMobil: { display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch",
+    paddingBottom: 2, scrollbarWidth: "none" },
+  orgVaelgerMobil: { background: "#1E1E1E", color: "#fff", border: "1px solid #3A3A3A",
+    borderRadius: 8, padding: "6px 8px", fontSize: 13, fontFamily: "inherit",
+    maxWidth: 170, flexShrink: 0 },
+
+  // Dagsliste — kalenderens form på en lille skærm.
+  agendaDag: { background: "#fff", borderRadius: 12, padding: 12,
+    boxShadow: "0 1px 2px rgba(15,23,42,0.07)" },
+  agendaHoved: { display: "flex", alignItems: "center", fontSize: 13.5, fontWeight: 600,
+    marginBottom: 8, textTransform: "capitalize" },
+  agendaOpslag: { display: "block", width: "100%", textAlign: "left", border: "none",
+    background: "#F8FAFF", borderRadius: "0 8px 8px 0", padding: "9px 11px",
+    marginTop: 6, cursor: "pointer", fontFamily: "inherit" },
+  agendaTid: { fontSize: 11.5, color: "#64748B" },
+  agendaTekst: { fontSize: 13.5, color: "#111111", marginTop: 2, lineHeight: 1.35,
+    display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" },
 
   h1: { fontSize: 24, fontWeight: 600, letterSpacing: "-0.02em", margin: "0 0 4px" },
   h2: { fontSize: 16, fontWeight: 600, margin: "0 0 4px" },
@@ -3766,8 +3906,16 @@ const styles = {
   overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 300,
     display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 16px",
     overflowY: "auto" },
+  // På telefonen er en dialog med luft omkring bare en mindre skærm. Den får
+  // det hele, og lukkeknappen sidder øverst hvor tommelfingeren leder.
+  overlayMobil: { position: "fixed", inset: 0, background: "#fff", zIndex: 300,
+    display: "block", overflowY: "auto", WebkitOverflowScrolling: "touch" },
   dialog: { background: "#fff", borderRadius: 14, width: "100%", maxWidth: 900,
     boxShadow: "0 20px 50px rgba(15,23,42,0.28)", overflow: "hidden" },
+  dialogMobil: { background: "#fff", width: "100%", minHeight: "100%" },
+  dialogKropMobil: { padding: 12 },
+  fanerMobil: { display: "flex", gap: 4, padding: "0 12px", borderBottom: "1px solid #E7EAF3",
+    overflowX: "auto", scrollbarWidth: "none" },
   dialogHoved: { display: "flex", alignItems: "center", gap: 10, padding: "16px 20px 12px" },
   faner: { display: "flex", gap: 4, padding: "0 20px", borderBottom: "1px solid #E7EAF3" },
   fane: { border: "none", background: "transparent", color: "#64748B", cursor: "pointer",
