@@ -50,3 +50,16 @@ seeden ikke gætter. Med én organisation var to demokunder havnet hos Jammerbug
 Opgraderes en database med rigtige data fra en ældre udgave: fjern
 `supabase/seed.sql` i den lokale kopi før `npm run db:setup` — eller indsæt
 `seed.sql` i `schema_migrations` først.
+
+## Bad om 10 opslag, fik 5 — uden et ord (4.10.2026)
+
+Prompten bygges, når man trykker «Byg prompt til copy/paste», og blev kun ryddet,
+når kunde, afsender, strategi, vinkler, sprog eller retningslinjer blev ændret. Rettede
+man antal, navn, brief, mål, datoer eller kanaler bagefter, stod den gamle prompt der
+stadig — med «Lav 5 opslag». Claude gjorde præcis, hvad der stod, og appen oprettede,
+hvad der kom.
+
+Nu rydder alle felter i briefen prompten, og `antalAfvigelse` i `prompt.js` stopper
+oprettelsen, hvis svaret har et andet antal end bedt om. Andet tryk med samme svar
+opretter alligevel. Ved «Ny brief» på en eksisterende kampagne er det vigtigst: de
+gamle opslag slettes, før de nye oprettes. Test i `test-omskrivning.mjs`.

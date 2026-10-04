@@ -2,7 +2,7 @@
 
 Hvor projektet står. **Opdateres ved hver ændring der flytter noget her.**
 
-_Sidst opdateret: 2026-10-04 (Jammerbugts kopi)_
+_Sidst opdateret: 2026-10-04 (Jammerbugts kopi) — antal opslag tjekkes, AI-billeder kraever Cloudflare-noegler paa Netlify_
 
 > **Jammerbugts kopi, 4.10.2026.** Koden er Jonns udgave (`somelinkedin-app`
 > @ `2c67211`). Jammerbugts database (`phloauxphbyewwjnaxcv`) har migration

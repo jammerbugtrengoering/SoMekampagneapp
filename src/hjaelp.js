@@ -41,6 +41,7 @@ export const HJAELP = {
       ["Strategi og vinkler", "planen for serien som helhed, og grebene i de enkelte opslag. Vælger du ingen, vælger Claude selv."],
       ["Sprog", "dansk eller engelsk. Fagligt indhold på LinkedIn når typisk længere på engelsk."],
       ["Gem uden at køre", "lægger briefen til side, så du kan skrive den færdig nu og generere senere."],
+      ["Antal opslag", "retter du noget i briefen efter at have bygget prompten, forsvinder prompten, og du bygger den igen. Har Claudes svar ikke det antal opslag, du bad om, siger appen det, før noget bliver oprettet."],
     ],
     bemaerk:
       "Det du skriver bliver husket i browseren, indtil kampagnen er gemt. " +

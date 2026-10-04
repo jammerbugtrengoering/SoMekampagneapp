@@ -10,7 +10,7 @@ import {
 } from "./billeder";
 import { foersteSaetning } from "./kanalregler";
 import {
-  SPROG, STANDARD_RETNINGSLINJER, byggArtikelPrompt, byggCoverPrompt, byggOmskrivPrompt,
+  SPROG, STANDARD_RETNINGSLINJER, antalAfvigelse, byggArtikelPrompt, byggCoverPrompt, byggOmskrivPrompt,
   byggPrompt, flytDage, gaeldendeRetningslinjer, laesArtikel, laesCoverBrief,
   laesOmskrivning, laesOpslag, tidspunkt,
 } from "./prompt";
@@ -1082,6 +1082,8 @@ function NyKampagne({ brands, kunder, kanalerFor, visToast, efterOprettelse, org
   const [valgte, setValgte] = useState(["facebook", "instagram"]);
   const [prompt, setPrompt] = useState("");
   const [svar, setSvar] = useState("");
+  // Det svar, der er sagt ja til trods forkert antal. Se antalAfvigelse.
+  const [godtagetAntal, setGodtagetAntal] = useState(null);
   const [kopieret, setKopieret] = useState(false);
   const [venter, setVenter] = useState(false);
   const [fejl, setFejl] = useState("");
@@ -1184,6 +1186,7 @@ function NyKampagne({ brands, kunder, kanalerFor, visToast, efterOprettelse, org
 
   function skift(p) {
     setValgte((v) => (v.includes(p) ? v.filter((x) => x !== p) : [...v, p]));
+    setPrompt("");
   }
 
   async function byg() {
@@ -1243,6 +1246,15 @@ function NyKampagne({ brands, kunder, kanalerFor, visToast, efterOprettelse, org
       opslag = laesOpslag(kilde ?? svar, valgte);
     } catch (e) {
       setFejl(e.message);
+      return;
+    }
+
+    // Andet tryk med samme svar betyder «ja, brug dem alligevel». Kun ved
+    // copy/paste: et lokalt kald ville skulle koeres forfra for at sige ja.
+    const afvigelse = antalAfvigelse(opslag.length, antal);
+    if (afvigelse && !kilde && godtagetAntal !== svar) {
+      setGodtagetAntal(svar);
+      setFejl(afvigelse);
       return;
     }
 
@@ -1347,7 +1359,7 @@ function NyKampagne({ brands, kunder, kanalerFor, visToast, efterOprettelse, org
             </Felt>
 
             <Felt mrk="Kampagnenavn">
-              <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)}
+              <input style={styles.input} value={navn} onChange={(e) => { setNavn(e.target.value); setPrompt(""); }}
                 placeholder="fx Hovedrengøring efterår" />
             </Felt>
 
@@ -1387,25 +1399,25 @@ function NyKampagne({ brands, kunder, kanalerFor, visToast, efterOprettelse, org
 
             <Felt mrk="Brief">
               <textarea style={{ ...styles.input, minHeight: 110, fontFamily: "inherit" }}
-                value={brief} onChange={(e) => setBrief(e.target.value)}
+                value={brief} onChange={(e) => { setBrief(e.target.value); setPrompt(""); }}
                 placeholder="Skriv det som du ville sige det til en kollega." />
             </Felt>
 
             <Felt mrk="Mål (valgfrit)">
-              <input style={styles.input} value={maal} onChange={(e) => setMaal(e.target.value)}
+              <input style={styles.input} value={maal} onChange={(e) => { setMaal(e.target.value); setPrompt(""); }}
                 placeholder="fx 5 forespørgsler på gennemgang" />
             </Felt>
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <Felt mrk="Start" bredde={150}>
-                <input type="date" style={styles.input} value={start} onChange={(e) => setStart(e.target.value)} />
+                <input type="date" style={styles.input} value={start} onChange={(e) => { setStart(e.target.value); setPrompt(""); }} />
               </Felt>
               <Felt mrk="Slut" bredde={150}>
-                <input type="date" style={styles.input} value={slut} onChange={(e) => setSlut(e.target.value)} />
+                <input type="date" style={styles.input} value={slut} onChange={(e) => { setSlut(e.target.value); setPrompt(""); }} />
               </Felt>
               <Felt mrk="Antal opslag" bredde={120}>
                 <input type="number" min={1} max={20} style={styles.input}
-                  value={antal} onChange={(e) => setAntal(Number(e.target.value))} />
+                  value={antal} onChange={(e) => { setAntal(Number(e.target.value)); setPrompt(""); }} />
               </Felt>
             </div>
 
@@ -2605,6 +2617,7 @@ function RetKampagne({
   const [instruks, setInstruks] = useState("");
   const [prompt, setPrompt] = useState("");
   const [svar, setSvar] = useState("");
+  const [godtagetAntal, setGodtagetAntal] = useState(null);
   const [kopieret, setKopieret] = useState(false);
   const [nyBrief, setNyBrief] = useState(kampagne.brief ?? "");
   // En gemt brief uden opslag skal foreslaa en serie. Math.max(0, 1) gav 1,
@@ -2922,6 +2935,14 @@ function RetKampagne({
       nye = laesOpslag(kilde ?? svar, platforme);
     } catch (e) {
       return setFejl(e.message);
+    }
+
+    // Her er det vigtigst: de gamle opslag slettes lige nedenfor, så et for
+    // kort svar ville efterlade en kortere serie end den, der stod der.
+    const afvigelse = antalAfvigelse(nye.length, antal);
+    if (afvigelse && !kilde && godtagetAntal !== svar) {
+      setGodtagetAntal(svar);
+      return setFejl(afvigelse);
     }
 
     setVenter(true);
@@ -3551,11 +3572,11 @@ function RetKampagne({
                     </p>
                     <Felt mrk="Ny brief">
                       <textarea style={{ ...styles.input, minHeight: 100, fontFamily: "inherit" }}
-                        value={nyBrief} onChange={(e) => setNyBrief(e.target.value)} />
+                        value={nyBrief} onChange={(e) => { setNyBrief(e.target.value); setPrompt(""); }} />
                     </Felt>
                     <Felt mrk="Antal opslag" bredde={140}>
                       <input type="number" min={1} max={20} style={styles.input}
-                        value={antal} onChange={(e) => setAntal(Number(e.target.value))} />
+                        value={antal} onChange={(e) => { setAntal(Number(e.target.value)); setPrompt(""); }} />
                     </Felt>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       <button style={styles.primaryBtn} disabled={venter}

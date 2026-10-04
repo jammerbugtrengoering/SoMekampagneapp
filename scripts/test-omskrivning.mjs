@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { byggOmskrivPrompt, flytDage, laesOmskrivning } from "../src/prompt.js";
+import { antalAfvigelse, byggOmskrivPrompt, flytDage, laesOmskrivning } from "../src/prompt.js";
 
 let fejlede = 0;
 const test = (navn, fn) => {
@@ -17,6 +17,28 @@ const test = (navn, fn) => {
 };
 
 const svar = (opslag) => JSON.stringify({ opslag });
+
+console.log("\nAntal opslag i svaret");
+
+test("passer antallet, siges der intet", () => {
+  assert.equal(antalAfvigelse(10, 10), "");
+});
+
+test("færre end bedt om: siges højt med begge tal", () => {
+  const b = antalAfvigelse(5, 10);
+  assert.match(b, /bad om 10/);
+  assert.match(b, /har 5/);
+  assert.match(b, /5 manglende/);
+});
+
+test("flere end bedt om: siges også", () => {
+  assert.match(antalAfvigelse(12, 10), /bad om 10.*har 12/);
+});
+
+test("ugyldigt antal i feltet: ingen falsk alarm", () => {
+  assert.equal(antalAfvigelse(5, 0), "");
+  assert.equal(antalAfvigelse(5, NaN), "");
+});
 
 console.log("\nOmskrivning parres med rigtigt opslag");
 

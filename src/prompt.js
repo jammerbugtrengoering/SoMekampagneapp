@@ -406,6 +406,27 @@ export function laesOpslag(raa, tilladteKanaler) {
   });
 }
 
+/**
+ * Siger fra, naar svaret har et andet antal opslag end der blev bedt om.
+ *
+ * 4.10.2026: der blev bedt om 10 og oprettet 5 -- uden et ord. Prompten var
+ * bygget, mens feltet stadig stod paa 5, og blev ikke bygget om, da tallet
+ * blev rettet. Claude kan ogsaa selv levere faerre, hvis svaret bliver langt.
+ * Begge dele er usynlige, indtil man taeller opslagene bagefter. Ved «Ny brief»
+ * er det vaerre: de gamle opslag slettes, foer de nye oprettes.
+ *
+ * Returnerer en tom streng, naar antallet passer.
+ */
+export function antalAfvigelse(fik, badOm) {
+  const n = Number(badOm);
+  if (!Number.isInteger(n) || n < 1 || fik === n) return "";
+  const retning = fik < n
+    ? `Bed Claude om de ${n - fik} manglende i samme samtale, og indsæt hele serien igen.`
+    : "Slet de overskydende i svaret, eller ret antallet og byg prompten igen.";
+  return `Du bad om ${n} opslag, men svaret har ${fik}. ${retning} ` +
+    `Vil du bruge de ${fik} alligevel, så tryk på knappen igen.`;
+}
+
 /* =====================================================================
    Omskrivning af en eksisterende serie.
 
