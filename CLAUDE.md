@@ -20,7 +20,7 @@ gren, og kør nye migrationer mod Jammerbugts database FØR grenen flettes.
 | | |
 |---|---|
 | Kildekode | `jammerbugtrengoering/SoMekampagneapp`, gren `main` |
-| Drift | Netlify → Jammerbugts eget site (navn skal skrives ind her) |
+| Drift | Netlify → `jammerbugtsomeplanningapp.netlify.app` (ligger ikke i Jonns Netlify-team) |
 | Database | Supabase, projekt `phloauxphbyewwjnaxcv` (Jammerbugts) |
 | Sprog | JavaScript som ES-moduler. Ingen TypeScript |
 | Stak | React 19 · Vite 8 · Postgres 16 · Netlify Functions v2 (Node 22) |
