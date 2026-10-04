@@ -39,3 +39,14 @@ Derfor to regler i dette repo:
    er ikke succes. En afvist forespørgsel er ikke stilhed.
 2. **En spærre der afviser, skal logge.** En sikkerhedsspærre der afviser
    i stilhed er ikke en spærre — det er en fælde man selv falder i.
+
+## `db:setup` kører seeden på en base, der allerede har data (4.10.2026)
+
+Den gamle `setup-db.mjs` sprang seeden over, hvis der var kunder, men noterede den
+aldrig i `schema_migrations`. Den nye kører `seed.sql` én gang, hvis den ikke står
+der. På Jammerbugts database gik det godt, fordi der var to organisationer, og
+seeden ikke gætter. Med én organisation var to demokunder havnet hos Jammerbugt.
+
+Opgraderes en database med rigtige data fra en ældre udgave: fjern
+`supabase/seed.sql` i den lokale kopi før `npm run db:setup` — eller indsæt
+`seed.sql` i `schema_migrations` først.
