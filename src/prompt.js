@@ -56,13 +56,14 @@ export const KAMPAGNE_SKEMA = {
         type: "object",
         properties: {
           tekst: { type: "string" },
+          krog_alt: { type: "string" },
           hashtags: { type: "array", items: { type: "string" } },
           billedbrief: { type: "string" },
           dag: { type: "integer" },
           klokke: { type: "string" },
           kanaler: { type: "array", items: { type: "string", enum: KANALER } },
         },
-        required: ["tekst", "hashtags", "billedbrief", "dag", "klokke", "kanaler"],
+        required: ["tekst", "krog_alt", "hashtags", "billedbrief", "dag", "klokke", "kanaler"],
       },
     },
   },
@@ -73,9 +74,8 @@ export const KAMPAGNE_SKEMA = {
  * Briefingen om brandet — og om kunden bag.
  *
  * Forbehold findes to steder: brandets egne, og kundens, der gælder alle
- * dens brands. Jammerbugts regel om samtykke til billeder af medarbejdere
- * gælder både rengøring, hundevask og vaskeri, og skal ikke skrives tre
- * gange. Begge lister sendes med, kundens først.
+ * dens brands. En kundes regel om samtykke til billeder af medarbejdere
+ * gælder alle dens brands og skal ikke skrives tre gange. Begge lister sendes med, kundens først.
  */
 function brandBriefing(brand) {
   const kunde = brand.customers ?? brand.kunde ?? null;
@@ -86,19 +86,64 @@ function brandBriefing(brand) {
     kunde?.name && kunde.name !== brand.name && `Del af: ${kunde.name}`,
     brand.description && `Hvad de laver: ${brand.description}`,
     brand.target_audience && `Målgruppe: ${brand.target_audience}`,
+    // Hvad de VED styrer teksten mere end hvem de er. I et fagligt felt er
+    // afstanden mellem indforstået og banal kort, og den afgøres her.
+    brand.maalgruppe_ved && `Det ved målgruppen allerede — forklar det ikke forfra:\n${brand.maalgruppe_ved}`,
+    brand.maalgruppe_undgaa && `Det er de trætte af at høre — find en anden vinkel:\n${brand.maalgruppe_undgaa}`,
     brand.tone_of_voice && `Tone of voice: ${brand.tone_of_voice}`,
+    // Eksempler slår beskrivelser. Et adjektiv som «jordnær» kan betyde
+    // hvad som helst; tre rigtige opslag kan kun betyde én ting.
+    brand.eksempel_opslag &&
+      `SÅDAN LYDER DE, NÅR DET ER GODT. Ram denne stemme — kopiér ikke indholdet:\n${brand.eksempel_opslag}`,
     kunde?.samtykke && `Om samtykke og billeder: ${kunde.samtykke}`,
     forbud && `MÅ IKKE:\n${forbud}`,
   ].filter(Boolean).join("\n");
 }
 
-const RETNINGSLINJER = `Du er content-planlægger for en dansk marketingafdeling.
+/* ---------------------------------------------------------------------
+   Hvad der plejer at blive rettet.
+
+   Appen gemmer både det modellen skrev og det der blev godkendt. Hvor de
+   to er forskellige, ligger den mest præcise beskrivelse af stemmen der
+   findes — mere præcis end noget adjektiv i en brandprofil, fordi den er
+   et rigtigt valg og ikke en hensigt.
+
+   Kun de nyeste, og kun når der faktisk ER rettet: et par hvor de to er
+   ens siger intet, og tomme eksempler gør prompten længere uden at gøre
+   den bedre.
+   --------------------------------------------------------------------- */
+export function laerteRettelser(par, maks = 6) {
+  const brugbare = (par ?? [])
+    .filter((x) => x?.foer && x?.efter && x.foer.trim() !== x.efter.trim())
+    .slice(0, maks);
+
+  if (!brugbare.length) return "";
+
+  return `SÅDAN BLIVER DINE UDKAST TYPISK RETTET.
+Det er det bedste billede af stemmen vi har. Skriv så rettelserne ikke er nødvendige.
+
+${brugbare
+  .map((x, i) => `${i + 1}. Du skrev:\n"${x.foer.trim()}"\n\n   Det blev sendt som:\n"${x.efter.trim()}"`)
+  .join("\n\n")}`;
+}
+
+export const STANDARD_RETNINGSLINJER = `Du er content-planlægger for en dansk marketingafdeling.
 
 Du skriver opslag der lyder som om et menneske fra virksomheden har skrevet dem:
 - Ingen "🚀 Spændende nyheder!" eller anden LinkedIn-plastik.
 - Ingen tomme superlativer. Sig noget konkret eller lad være.
 - Variér længde og form hen over serien.
-- Skriv på dansk. Undgå anglicismer hvor der findes et dansk ord.
+
+VÆLG EN TYPE PER OPSLAG, og brug ikke samme type to gange i træk:
+- kundehistorie: noget der faktisk skete, med et konkret udfald
+- bag om arbejdet: hvordan noget gøres, og hvorfor sådan
+- fagligt tip: noget læseren kan bruge i morgen
+- sæsonaktuelt: noget der er relevant lige nu og ikke om tre måneder
+- spørgsmål: et ægte et, som nogen ville svare på
+- modsvar: en udbredt antagelse der ikke holder
+- tal: et resultat, en måling, en pris — noget der kan efterprøves
+
+«Variér» uden en liste bliver til syv opslag der ligner hinanden. Vælg bevidst.
 
 Tilpas til kanalen: Facebook tåler længere tekst og en historie. Instagram er kortere og båret af billedet. LinkedIn er fagligt og henvender sig til beslutningstagere.
 
@@ -106,9 +151,121 @@ Respekter MÅ IKKE-listen absolut. Den er ikke til forhandling.
 
 Spred opslagene fornuftigt over perioden — ikke alle på samme dag, og på tidspunkter hvor målgruppen faktisk er på.`;
 
-function opgaven({ brand, navn, brief, maal, antal, kanaler, start, slut }) {
-  return `${brandBriefing(brand)}
+export const SPROG = {
+  da: { navn: "Dansk", kode: "da" },
+  en: { navn: "Engelsk", kode: "en" },
+};
 
+/**
+ * Sproget opslagene skrives på.
+ *
+ * Står sidst i prompten, og det er ikke en tilfældighed. Retningslinjerne
+ * kan redigeres af brugeren, og en gammel gemt udgave kan sagtens stadig
+ * indeholde «skriv på dansk». Kommer sprogkravet efter dem, vinder det —
+ * og ellers ville en engelsk kampagne komme tilbage på dansk uden at
+ * nogen kunne se hvorfor.
+ *
+ * Alt andet end selve opslagsteksten bliver på dansk: briefen, brandets
+ * profil og appens egne felter. Det er kun det læseren ser der skifter
+ * sprog — billedbriefen skal en dansk fotograf kunne læse.
+ */
+function sprogkrav(sprog) {
+  if (sprog === "en") {
+    return `SPROG — DETTE OVERTRUMFER ALT ANDET I PROMPTEN.
+Write "tekst", "krog_alt" and "hashtags" in ENGLISH. Natural, professional English
+as a native speaker would write it — not a translation of a Danish sentence.
+Danish idioms rarely survive; find the English way of saying it instead.
+Keep proper nouns, company names and product names as they are.
+
+"billedbrief" stays in Danish: it is read by the person taking the picture, not by the audience.`;
+  }
+
+  return `SPROG: dansk. Undgå anglicismer hvor der findes et dansk ord.
+Det gælder også hashtags.`;
+}
+
+/**
+ * Hvilke retningslinjer gælder?
+ *
+ * Kampagnens egne, ellers organisationens, ellers de indbyggede. En tom
+ * streng er ikke et valg om at skrive uden retningslinjer — det er et felt
+ * ingen har udfyldt, og så er standarden bedre end ingenting.
+ */
+export function gaeldendeRetningslinjer({ kampagne, org } = {}) {
+  return (
+    kampagne?.retningslinjer?.trim() ||
+    org?.retningslinjer?.trim() ||
+    STANDARD_RETNINGSLINJER
+  );
+}
+
+/**
+ * Afsenderen.
+ *
+ * Den samme viden fortalt af en der har bygget det, en der har ryddet op
+ * efter det, og en der ikke tror på det, giver tre forskellige opslag.
+ * Arketypen er det valg — og den står før alt andet, fordi den afgør
+ * hvilken ret teksten taler med.
+ */
+function afsender(arketype) {
+  const t = typeof arketype === "string" ? arketype : arketype?.beskrivelse;
+  if (!t?.trim()) return "";
+  return `DU SKRIVER SOM DENNE AFSENDER. Det er ikke en rolle du beskriver — det er den du ER i teksten:
+${t.trim()}`;
+}
+
+/**
+ * Planen for serien, og grebene i det enkelte opslag.
+ *
+ * To niveauer, fordi det er to forskellige beslutninger. Strategien
+ * gaelder de N opslag TILSAMMEN — hvordan de fordeler sig, hvad der kommer
+ * foerst, hvornaar der maa bedes om noget. Vinklerne gaelder ét opslag ad
+ * gangen.
+ *
+ * Det er fordelingen der er hele pointen. Beder man om fem opslag uden at
+ * sige andet, faar man den samme gode tekst fem gange: modellen har ingen
+ * grund til at gribe nummer to anderledes an end nummer et. Listen alene
+ * er ikke nok — der skal staa at de skal FORDELES, og at to ens i traek er
+ * forkert.
+ *
+ * Navnene maa ikke ende i teksten. «PAS — problem, agitér, løsning» er en
+ * arbejdsanvisning til modellen, ikke en overskrift til laeseren.
+ */
+function strategiAfsnit({ strategi, vinkler, antal }) {
+  const dele = [];
+
+  const plan = typeof strategi === "string" ? strategi : strategi?.beskrivelse;
+  if (plan?.trim()) {
+    dele.push(`PLANEN FOR SERIEN. Den gælder de ${antal} opslag tilsammen, ikke det enkelte:
+${plan.trim()}`);
+  }
+
+  const liste = (vinkler ?? []).filter((v) => v?.navn && v?.beskrivelse);
+  if (liste.length) {
+    // Raekker antallet, skal de alle sammen i brug. Ellers vaelger modellen
+    // -- og saa er det bedre at sige det, end at lade den gaette om den maa.
+    const daekning =
+      liste.length <= antal
+        ? "Brug hver vinkel mindst én gang."
+        : `Vælg de ${antal} der passer bedst til briefen, og lad resten ligge.`;
+
+    dele.push(`VINKLER. Ét greb per opslag. Fordel dem hen over serien — aldrig samme vinkel to gange i træk.
+${daekning}
+Navnene er arbejdsanvisninger til dig. De må ikke stå i opslaget.
+
+${liste.map((v) => `- ${v.navn}: ${v.beskrivelse}`).join("\n")}`);
+  }
+
+  return dele.join("\n\n");
+}
+
+function opgaven({ brand, navn, brief, maal, antal, kanaler, start, slut, rettelser, arketype, strategi, vinkler, sprog }) {
+  const laert = laerteRettelser(rettelser);
+  const hvem = afsender(arketype);
+  const plan = strategiAfsnit({ strategi, vinkler, antal });
+
+  return `${hvem ? `${hvem}\n\n---\n\n` : ""}${brandBriefing(brand)}
+${laert ? `\n---\n\n${laert}\n` : ""}
 ---
 
 KAMPAGNE: ${navn}
@@ -118,17 +275,27 @@ Periode: ${start}${slut ? ` til ${slut}` : ""}
 Kanaler til rådighed: ${kanaler.join(", ")}
 
 ${klipRegler(kanaler)}
-
+${plan ? `\n---\n\n${plan}\n` : ""}
 Lav ${antal} opslag.
 
 "dag" er antal dage efter startdatoen — 0 er startdagen. "klokke" er HH:MM i dansk tid.
 "hashtags" er uden havelåge. "billedbrief" beskriver hvad billedet skal vise, konkret nok
-til at en fotograf kan arbejde ud fra det.`;
+til at en fotograf kan arbejde ud fra det.
+
+"krog_alt" er en ANDEN første linje til samme opslag — samme indhold, andet greb.
+Ikke en omskrivning med andre ord: en anden måde at komme ind på historien.
+Er den første et spørgsmål, så lad den anden være en påstand. Begynder den ét
+sted, så begynd den anden et andet. To varianter der ligner hinanden er intet
+valg, og så er feltet spildt.
+
+---
+
+${sprogkrav(sprog)}`;
 }
 
 /** Til copy/paste i browseren: alt i én tekst, med JSON-formatet forklaret. */
 export function byggPrompt(args) {
-  return `${RETNINGSLINJER}
+  return `${args.retningslinjer?.trim() || STANDARD_RETNINGSLINJER}
 
 ---
 
@@ -141,6 +308,7 @@ Svar KUN med JSON i en \`\`\`json-blok, i præcis dette format:
   "opslag": [
     {
       "tekst": "Selve opslagsteksten. Uden hashtags.",
+      "krog_alt": "En anden første linje til samme opslag.",
       "hashtags": ["uden", "havelåge"],
       "billedbrief": "Hvad billedet skal vise.",
       "dag": 0,
@@ -154,7 +322,7 @@ Svar KUN med JSON i en \`\`\`json-blok, i præcis dette format:
 
 /** Til `claude -p`: skemaet håndhæver formen, så det skal ikke forklares i teksten. */
 export function byggOpgave(args) {
-  return `${RETNINGSLINJER}
+  return `${args.retningslinjer?.trim() || STANDARD_RETNINGSLINJER}
 
 ---
 
@@ -225,6 +393,9 @@ export function laesOpslag(raa, tilladteKanaler) {
 
     return {
       tekst: tekstFelt.trim(),
+      // Valgfri: en gammel prompt eller en model der sprang feltet over
+      // skal ikke få hele indsættelsen til at fejle.
+      krogAlt: typeof o.krog_alt === "string" ? o.krog_alt.trim() : "",
       hashtags: (Array.isArray(o.hashtags) ? o.hashtags : [])
         .map((t) => String(t).replace(/^#/, "").trim()).filter(Boolean),
       billedbrief: typeof o.billedbrief === "string" ? o.billedbrief : "",
@@ -286,13 +457,14 @@ function opslagsliste(opslag) {
     .join("\n\n");
 }
 
-function omskrivOpgave({ brand, kampagne, opslag, instruks }) {
+function omskrivOpgave({ brand, kampagne, opslag, instruks, arketype, sprog }) {
+  const hvem = afsender(arketype);
   // Kanalerne står på opslagene her, ikke i en liste for sig.
   const kanaler = [...new Set(
     opslag.flatMap((o) => (o.maal ?? []).map((m) => m.platform)).filter(Boolean),
   )];
 
-  return `${brandBriefing(brand)}
+  return `${hvem ? `${hvem}\n\n---\n\n` : ""}${brandBriefing(brand)}
 
 ---
 
@@ -317,12 +489,16 @@ teksten havner på det rigtige opslag. Tidspunkter og kanaler ændres ikke — d
 står kun her, så du kan tage hensyn til dem.
 
 Rører en rettelse ikke et bestemt opslag, så send det uændret tilbage frem for
-at udelade det.`;
+at udelade det.
+
+---
+
+${sprogkrav(sprog ?? kampagne?.sprog)}`;
 }
 
 /** Til copy/paste i browseren. */
 export function byggOmskrivPrompt(args) {
-  return `${RETNINGSLINJER}
+  return `${args.retningslinjer?.trim() || STANDARD_RETNINGSLINJER}
 
 ---
 
@@ -341,7 +517,7 @@ Svar KUN med JSON i en \`\`\`json-blok:
 
 /** Til `claude -p`, hvor skemaet håndhæver formen. */
 export function byggOmskrivOpgave(args) {
-  return `${RETNINGSLINJER}
+  return `${args.retningslinjer?.trim() || STANDARD_RETNINGSLINJER}
 
 ---
 
@@ -414,6 +590,306 @@ export function laesOmskrivning(raa, antal) {
   }
 
   return [...rettelser.values()].sort((a, b) => a.nr - b.nr);
+}
+
+/* =====================================================================
+   Artiklen: serien samlet til ét stykke
+
+   Opslagene blev skåret op for at kunne stå alene i et feed. Artiklen er
+   den modsatte bevægelse: at sætte dem sammen igen og skrive det ind som
+   ikke var plads til.
+
+   Derfor er det udtrykkeligt IKKE en opsummering. En opsummering af syv
+   opslag læses af ingen — den der så dem har set dem, og den der ikke
+   gjorde, får en liste over noget han gik glip af. Artiklen skal kunne
+   læses af en der aldrig har set et eneste af opslagene, og stadig give
+   ham noget.
+   ===================================================================== */
+
+export const ARTIKEL_SKEMA = {
+  type: "object",
+  properties: {
+    titel: { type: "string" },
+    underrubrik: { type: "string" },
+    brødtekst: { type: "string" },
+    billedbrief: { type: "string" },
+  },
+  required: ["titel", "brødtekst", "billedbrief"],
+};
+
+function artikelOpgave({ brand, kampagne, opslag, arketype, sprog, instruks }) {
+  const hvem = afsender(arketype);
+
+  const serien = (opslag ?? [])
+    .map((o, i) => `--- OPSLAG ${i + 1} ---
+${o.tekst ?? o.body}`)
+    .join("\n\n");
+
+  return `${hvem ? `${hvem}\n\n---\n\n` : ""}${brandBriefing(brand)}
+
+---
+
+KAMPAGNE: ${kampagne.name}
+${kampagne.brief ? `Brief: ${kampagne.brief}` : ""}
+${kampagne.goal ? `Mål: ${kampagne.goal}` : ""}
+
+Her er de ${(opslag ?? []).length} opslag serien bestod af:
+
+${serien}
+
+---
+
+SKRIV DEM SAMMEN TIL ÉN ARTIKEL.
+
+Opslagene var brudstykker af én pointe, skåret op så hvert stykke kunne stå
+alene i et feed. Artiklen er den modsatte bevægelse: sæt dem sammen igen, og
+skriv det ind som der ikke var plads til.
+
+Det her er ikke en opsummering. Skriv ikke «i denne serie gennemgik jeg» og
+opremser ikke opslagene. En læser der aldrig har set et eneste af dem, skal
+kunne læse artiklen fra ende til anden og få noget ud af den.
+
+Det betyder konkret:
+- Find den påstand de syv opslag tilsammen argumenterer for, og skriv DEN.
+- Rækkefølgen må gerne være en anden end opslagenes. Et argument har en
+  anden orden end en kalender.
+- Hvor to opslag sagde det samme med forskellige ord, sig det én gang.
+- Hvor et opslag stillede et spørgsmål og et andet svarede, saml dem.
+- Det der kun gav mening som krog i et feed — «Her er tre ting» — skal væk.
+- Tilføj det mellemregningerne manglede. Et opslag har ikke plads til
+  forbeholdet eller til hvorfor; en artikel har.
+
+Form:
+- 700-1200 ord. Længere er ikke bedre, men kortere bliver til et opslag.
+- Mellemrubrikker hvor argumentet skifter. Ikke flere end fem.
+- Ingen punktopstillinger med ét ord i. Enten en sætning eller brødtekst.
+- Ingen hashtags. Det er en artikel, ikke et opslag.
+- Slut hvor argumentet slutter. Ingen opfordring til at kontakte dig,
+  medmindre briefen udtrykkeligt bad om det.
+
+"titel" er artiklens overskrift. Den må gerne være tør og konkret —
+LinkedIn-artikler læses fordi emnet rammer, ikke fordi overskriften lokker.
+"underrubrik" er én linje der siger hvad læseren får. Valgfri.
+"brødtekst" er hele artiklen med mellemrubrikker som «## Overskrift» på egen linje.
+
+"billedbrief" beskriver coverbilledet — det brede billede øverst i artiklen, og
+det første læseren ser. Skriv hvad det skal VISE, konkret nok til at en fotograf
+kunne tage det: sted, lys, hvad der er i billedet. Ingen mennesker, ingen tekst
+i billedet, ingen genkendelige varemærker. Det skal passe til artiklens emne
+uden at illustrere den bogstaveligt — en artikel om anlægsdata har ikke brug
+for et billede af en database.
+${instruks?.trim() ? `\n---\n\nSÆRLIGT FOR DENNE ARTIKEL: ${instruks.trim()}` : ""}
+
+---
+
+${sprogkrav(sprog ?? kampagne?.sprog)}`;
+}
+
+/** Til copy/paste i browseren. */
+export function byggArtikelPrompt(args) {
+  return `${args.retningslinjer?.trim() || STANDARD_RETNINGSLINJER}
+
+---
+
+${artikelOpgave(args)}
+
+Svar KUN med JSON i en \`\`\`json-blok:
+
+\`\`\`json
+{
+  "titel": "Artiklens overskrift",
+  "underrubrik": "Én linje om hvad læseren får. Må udelades.",
+  "brødtekst": "Hele artiklen. Mellemrubrikker som ## Overskrift på egen linje.",
+  "billedbrief": "Hvad coverbilledet skal vise."
+}
+\`\`\``;
+}
+
+/** Til `claude -p`, hvor skemaet håndhæver formen. */
+export function byggArtikelOpgave(args) {
+  return `${args.retningslinjer?.trim() || STANDARD_RETNINGSLINJER}
+
+---
+
+${artikelOpgave(args)}`;
+}
+
+/**
+ * Læser artiklen og samler den til én tekst.
+ *
+ * Titlen og underrubrikken kommer som egne felter, fordi modellen ellers
+ * skriver dem ind i brødteksten på hver sin måde. Her sættes de sammen én
+ * gang, så det der kopieres ind i LinkedIn altid ser ens ud.
+ */
+export function laesArtikel(raa) {
+  let data = raa;
+
+  if (typeof raa === "string") {
+    const tekst = raa.trim();
+    if (!tekst) throw new Error("Indsæt Claudes svar først.");
+
+    const blok = tekst.match(/```(?:json)?\s*([\s\S]*?)```/);
+    let kandidat = blok ? blok[1].trim() : tekst;
+
+    if (!blok) {
+      const start = kandidat.indexOf("{");
+      const slut = kandidat.lastIndexOf("}");
+      if (start === -1 || slut === -1) {
+        throw new Error("Kunne ikke finde JSON i det du indsatte.");
+      }
+      kandidat = kandidat.slice(start, slut + 1);
+    }
+
+    try {
+      data = JSON.parse(kandidat);
+    } catch (e) {
+      throw new Error(`JSON'en kunne ikke læses: ${e.message}`);
+    }
+  }
+
+  const titel = typeof data?.titel === "string" ? data.titel.trim() : "";
+  const brød = typeof data?.brødtekst === "string" ? data.brødtekst.trim() : "";
+
+  if (!titel) throw new Error("Artiklen mangler en titel.");
+  if (!brød) throw new Error("Artiklen mangler brødtekst.");
+
+  const under = typeof data?.underrubrik === "string" ? data.underrubrik.trim() : "";
+  // Billedbriefen er ikke afgoerende for artiklen. Kommer den ikke med --
+  // fordi prompten er gammel, eller modellen sprang feltet over -- skal
+  // hele artiklen ikke afvises af den grund.
+  const billedbrief = typeof data?.billedbrief === "string" ? data.billedbrief.trim() : "";
+
+  return {
+    titel,
+    underrubrik: under,
+    brødtekst: brød,
+    billedbrief,
+    // Den samlede tekst er det man kopierer. Titlen står først, fordi
+    // LinkedIns editor har et titelfelt man alligevel skal udfylde.
+    //
+    // Delene samles med én tom linje imellem, og en manglende underrubrik
+    // efterlader ikke et hul. Det lyder småligt, men teksten går direkte
+    // ind i en editor — et ekstra linjeskift er noget man selv skal opdage
+    // og rette hver eneste gang.
+    samlet: [titel, under, brød].filter((x) => x).join("\n\n"),
+  };
+}
+
+/* ---------------------------------------------------------------------
+   Kun coverbriefen.
+
+   Artikelprompten foreslår en brief sammen med teksten, men den vej
+   findes kun når artiklen skrives. Har man allerede en artikel -- måske
+   rettet i hånden, måske fra før feltet fandtes -- skal man kunne få en
+   brief uden at kaste artiklen væk og skrive den om.
+
+   Derfor denne: den læser artiklen og svarer med én ting.
+   --------------------------------------------------------------------- */
+
+export const COVER_SKEMA = {
+  type: "object",
+  properties: { billedbrief: { type: "string" } },
+  required: ["billedbrief"],
+};
+
+function coverOpgave({ brand, artikel, arketype }) {
+  const hvem = afsender(arketype);
+
+  return `${hvem ? `${hvem}\n\n---\n\n` : ""}${brandBriefing(brand)}
+
+---
+
+HER ER ARTIKLEN:
+
+${(artikel ?? "").trim()}
+
+---
+
+FORESLÅ ÉT COVERBILLEDE TIL DEN.
+
+Coveret er det brede billede øverst i artiklen, og det første læseren ser —
+før titlen. Skriv hvad det skal VISE, konkret nok til at en fotograf kunne
+tage det: sted, lys, hvad der er i billedet, og hvorfra det ses.
+
+Krav:
+- Ingen mennesker, ingen ansigter.
+- Ingen tekst, tal eller logoer i billedet.
+- Ingen genkendelige bygninger eller varemærker.
+- Det skal passe til emnet uden at illustrere det bogstaveligt. En artikel
+  om anlægsdata har ikke brug for et billede af en database, og en om
+  serviceaftaler har ikke brug for et håndtryk.
+- Et sted der ser brugt ud slår et der ser iscenesat ud.
+
+Svar med ÉN beskrivelse på to til fire sætninger. Ikke flere forslag, ikke
+en begrundelse — kun beskrivelsen.`;
+}
+
+/** Til copy/paste i browseren. */
+export function byggCoverPrompt(args) {
+  return `${coverOpgave(args)}
+
+Svar KUN med JSON i en \`\`\`json-blok:
+
+\`\`\`json
+{ "billedbrief": "Hvad coverbilledet skal vise." }
+\`\`\``;
+}
+
+/** Til `claude -p`, hvor skemaet håndhæver formen. */
+export function byggCoverOpgave(args) {
+  return coverOpgave(args);
+}
+
+/**
+ * Læser et coverforslag.
+ *
+ * Tager også imod en bar tekst. Beder man om én beskrivelse, svarer
+ * modellen tit med netop den og ingen JSON — og at afvise et svar der er
+ * præcis det man bad om, ville være pedanteri.
+ */
+export function laesCoverBrief(raa) {
+  if (raa && typeof raa === "object" && typeof raa.billedbrief === "string") {
+    const ud = raa.billedbrief.trim();
+    if (ud) return ud;
+    throw new Error("Der kom ingen billedbrief retur.");
+  }
+
+  const tekst = typeof raa === "string" ? raa.trim() : "";
+  if (!tekst) throw new Error("Indsæt Claudes svar først.");
+
+  const blok = tekst.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const kandidat = (blok ? blok[1] : tekst).trim();
+
+  if (kandidat.startsWith("{")) {
+    try {
+      const data = JSON.parse(kandidat);
+      const ud = typeof data?.billedbrief === "string" ? data.billedbrief.trim() : "";
+      if (ud) return ud;
+    } catch {
+      // Falder igennem til udtrækket nedenfor.
+    }
+
+    // JSON.parse fejler på noget der ser rigtigt ud men ikke er det, og den
+    // hyppigste grund er et ægte linjeskift inde i strengen — modellen
+    // skriver en beskrivelse over to linjer, og så er JSON'en ugyldig.
+    //
+    // Her tages værdien ud med hånden i stedet. Det er ikke en generel
+    // JSON-læser og skal ikke være det: vi leder efter præcis ét felt, og
+    // alternativet er at afvise et svar hvis indhold er helt i orden.
+    const m = kandidat.match(/"billedbrief"\s*:\s*"([\s\S]*?)"\s*[,}]/);
+    if (m) {
+      const ud = m[1].replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\s+/g, " ").trim();
+      if (ud) return ud;
+    }
+
+    throw new Error(
+      "Kunne ikke finde en «billedbrief» i svaret. Indsatte du hele svaret med?",
+    );
+  }
+
+  // Bar tekst. Citationstegn omkring hele svaret klippes væk — modellen
+  // sætter dem der, når man beder om «kun beskrivelsen».
+  return kandidat.replace(/^["«»]|["«»]$/g, "").trim();
 }
 
 /**

@@ -11,10 +11,21 @@ import { supabase } from "./supabaseClient";
 
 export const BUCKET = import.meta.env.VITE_SUPABASE_BUCKET || "kampagne-assets";
 
+/*
+ * LinkedIn har ikke sine egne mål. Den anbefaler præcis de tre der står her
+ * — 1200×627, 1080×1080 og 1080×1350 — så en fjerde valgmulighed ville
+ * være det samme billede under et andet navn. Det der manglede, var at
+ * etiketterne overhovedet nævnte LinkedIn.
+ *
+ * Bredformatet er rettet fra 630 til 627. Forskellen er tre pixels og uden
+ * betydning i sig selv, men det er det tal LinkedIn og Facebook selv
+ * opgiver, og et format der ikke er det man siger det er, bliver til en
+ * beskæring man ikke bad om.
+ */
 export const FORMATER = {
-  kvadrat: { navn: "Kvadrat 1:1", b: 1080, h: 1080, hint: "Instagram og Facebook" },
-  hoej:    { navn: "Stående 4:5", b: 1080, h: 1350, hint: "Fylder mest i Instagram-feedet" },
-  bred:    { navn: "Bred 16:9",   b: 1200, h: 630,  hint: "Facebook-link og delinger" },
+  kvadrat: { navn: "Kvadrat 1:1",  b: 1080, h: 1080, hint: "LinkedIn, Instagram og Facebook" },
+  hoej:    { navn: "Stående 4:5",  b: 1080, h: 1350, hint: "Fylder mest på mobil — også på LinkedIn" },
+  bred:    { navn: "Bred 1.91:1",  b: 1200, h: 627,  hint: "LinkedIn og Facebook: links og delinger" },
 };
 
 /**
@@ -249,6 +260,61 @@ export function base64TilBlob(base64, mimeType = "image/png") {
   const bytes = new Uint8Array(raa.length);
   for (let i = 0; i < raa.length; i++) bytes[i] = raa.charCodeAt(i);
   return new Blob([bytes], { type: mimeType });
+}
+
+/**
+ * Beskærer et billede til et af vores formater.
+ *
+ * FLUX-1-schnell tager hverken bredde, højde eller format — den leverer et
+ * kvadrat uanset hvad man beder om. Valget står altså mellem at beskære her
+ * eller at fjerne formatvalget, og beskæring er forsvarlig netop her: det er
+ * en baggrund uden motiv, så der er ikke noget der kan klippes i to.
+ *
+ * «Cover» og ikke «contain»: sorte kanter på et opslag ser ud som en fejl,
+ * mens et lidt strammere udsnit af en flade ikke gør.
+ *
+ * Er billedet allerede tæt på det rigtige forhold, sendes det uændret
+ * tilbage. Ellers ville et Gemini-billede blive komprimeret en gang til
+ * uden at blive bedre af det.
+ */
+export async function tilpasFormat(blob, formatId) {
+  const f = FORMATER[formatId];
+  if (!f) return blob;
+
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((klar, fejl) => {
+      const b = new Image();
+      b.onload = () => klar(b);
+      b.onerror = () => fejl(new Error("Billedet kunne ikke læses."));
+      b.src = url;
+    });
+
+    const oensket = f.b / f.h;
+    const faktisk = img.width / img.height;
+    if (Math.abs(faktisk - oensket) < 0.02) return blob;
+
+    const laerred = document.createElement("canvas");
+    laerred.width = f.b;
+    laerred.height = f.h;
+    const ctx = laerred.getContext("2d");
+
+    // Udsnittet tages fra midten. Skalaen er den største af de to, så
+    // lærredet altid er helt dækket.
+    const skala = Math.max(f.b / img.width, f.h / img.height);
+    const b = img.width * skala;
+    const h = img.height * skala;
+    ctx.drawImage(img, (f.b - b) / 2, (f.h - h) / 2, b, h);
+
+    return await new Promise((klar) =>
+      laerred.toBlob((ud) => klar(ud ?? blob), "image/jpeg", 0.9),
+    );
+  } catch {
+    // Kan billedet ikke beskæres, er et kvadrat bedre end ingenting.
+    return blob;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 const endelse = (type) =>

@@ -111,7 +111,7 @@ async function visAlt(db) {
   if (error) throw oversaetFejl(error)
 
   if (!orgs?.length) {
-    console.log('Ingen organisationer. Opret den første:\n  npm run org:opret "Jammerbugt Rengøring"')
+    console.log('Ingen organisationer. Opret den første:\n  npm run org:opret "Dit firma"')
     return
   }
 

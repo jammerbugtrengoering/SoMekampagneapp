@@ -172,14 +172,14 @@ test("kundens og brandets maa-ikke-lister lægges sammen", () => {
   const p = byggOmskrivPrompt({
     brand: {
       name: "Hundevask", guardrails: "ingen priser",
-      customers: { name: "Jammerbugt Rengøring", guardrails: "samtykke til medarbejderbilleder",
+      customers: { name: "Alfa A/S", guardrails: "samtykke til medarbejderbilleder",
                    samtykke: "Kun med skriftlig accept" },
     },
     kampagne: { name: "K" }, instruks: "kortere",
     opslag: [{ tekst: "x", hashtags: [], scheduled_at: null, maal: [] }],
   });
 
-  assert.match(p, /Del af: Jammerbugt Rengøring/);
+  assert.match(p, /Del af: Alfa A\/S/);
   assert.match(p, /samtykke til medarbejderbilleder/, "kundens forbehold skal med");
   assert.match(p, /ingen priser/, "brandets forbehold skal med");
   assert.match(p, /Kun med skriftlig accept/, "samtykketeksten skal med");

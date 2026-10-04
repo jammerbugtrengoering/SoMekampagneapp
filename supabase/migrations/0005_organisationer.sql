@@ -3,7 +3,7 @@
 --
 -- Hidtil har adgangen været binær: står du i app_admins, kan du alt — også
 -- på tværs af kunder. Det holder så længe alle brugere arbejder for samme
--- firma. Det holder ikke den dag PGU skal fortsætte uden Jammerbugt, og
+-- firma. Det holder ikke den dag to kunder skal skilles ad, og
 -- slet ikke hvis løsningen skal sælges til andre.
 --
 -- Modellen bliver:
@@ -11,7 +11,7 @@
 --   organisation → kunde → brand → kanal
 --
 -- Organisationen er den der har et abonnement og nogle brugere. Kunden er
--- den organisationen laver opslag for. For Jammerbugt er de to det samme;
+-- den organisationen laver opslag for. For en enkeltmandsvirksomhed er de to det samme;
 -- for et reklamebureau vil der ligge mange kunder under én organisation.
 --
 -- Roller i organisationen:

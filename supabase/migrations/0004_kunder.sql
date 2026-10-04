@@ -2,13 +2,13 @@
 -- Kundeniveau: kunde → brand → kanal
 --
 -- Hidtil har brands gjort to ting på én gang: været kunden man har en
--- relation til, OG brandet der har en stemme. For Jammerbugt Rengøring er
+-- relation til, OG brandet der har en stemme. For en kunde med flere forretningsområder er
 -- det ikke samme ting — hundevask taler ikke som erhvervsrengøring, men
 -- de deler kontaktperson, Business-portefølje og systemtoken.
 --
 -- Den vigtigste konsekvens er tokenet: et Meta-systemtoken hører til en
 -- portefølje og tildeles de sider det skal dække. Ét token kan altså dække
--- alle tre Jammerbugt-sider. Derfor flytter det op på kunden, med mulighed
+-- alle kundens sider. Derfor flytter det op på kunden, med mulighed
 -- for at overstyre på den enkelte kanal.
 --
 -- Migrationen er additiv og kan køres på en database med data i: hvert

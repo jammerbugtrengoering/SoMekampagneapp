@@ -1,6 +1,14 @@
 # Kampagneapp
 
-Planlægger og publicerer opslag for flere kunder på Facebook og Instagram.
+> **Starter du forfra?** Læs [`CLAUDE.md`](CLAUDE.md) først — den er den
+> korte orientering og har de regler der koster tid at lære på den hårde
+> måde. Denne fil er den lange gennemgang.
+>
+> [`docs/beslutninger.md`](docs/beslutninger.md) · hvorfor tingene er som de er
+> [`docs/faldgruber.md`](docs/faldgruber.md) · fejl der ikke lignede fejl
+> [`docs/status.md`](docs/status.md) · hvor vi er nu, og hvad der mangler
+
+Planlægger og publicerer opslag for flere kunder på LinkedIn, Facebook og Instagram.
 Claude skriver udkastene ud fra kundens brandprofil, du godkender dem, og en
 planlagt kørsel sender dem ud på det aftalte tidspunkt.
 
@@ -36,7 +44,7 @@ hemmelighed går gennem en Netlify-funktion:
 | `gem-kanal` | Krypterer og gemmer Meta-tokens, tester forbindelsen | Krypteringsnøglen findes kun på serveren |
 | `publicer-opslag` | "Publicér nu" | Tokens dekrypteres her; browseren ser dem aldrig |
 | `planlagt-publicering` | Cron hvert 15. min | Ingen brugersession bag et cron-kald |
-| `ai-baggrund` | Genererer en abstrakt baggrund | `GEMINI_API_KEY` maa ikke i klient-JS |
+| `ai-baggrund` | Genererer en abstrakt baggrund | Cloudflare (gratis) eller Gemini; noeglerne maa ikke i klient-JS |
 | `claude-lokal` | Kalder `claude -p` paa din maskine | Kun lokalt; kan ikke starte processer i skyen |
 | `gem-kunde` | Stamkort og kundens faelles Meta-token, samt test mod alle kanaler | Krypteringsnoeglen findes kun paa serveren |
 
@@ -51,7 +59,7 @@ Ayrshare, er det den ene funktion du udskifter.
 ```
 Kunde                      Brand (forretningsområde)     Kanal
 ─────────────────────      ─────────────────────────     ──────────────────
-Jammerbugt Rengøring  ──┬─ Rengøring                 ──┬─ Facebook-side
+Andersen & Co         ──┬─ Rengøring                 ──┬─ Facebook-side
   kontaktperson         │    tone, målgruppe, farver   └─ Instagram
   aftale, samtykke      │    egen må-ikke-liste
   ét systemtoken        ├─ Hundevask                 ──── Facebook-side
@@ -60,13 +68,13 @@ Jammerbugt Rengøring  ──┬─ Rengøring                 ──┬─ Face
 
 **Tokenet ligger på kunden.** Et Meta-systemtoken hører til en
 Business-portefølje og dækker de sider systembrugeren er tildelt — ét token
-til alle Jammerbugts sider, ét sted at rotere det. En kanal kan have sit eget
+til alle kundens sider, ét sted at rotere det. En kanal kan have sit eget
 token som nødudgang, hvis en side ligger i en anden portefølje; kanalens eget
 vinder altid. Reglen står som `gaeldendeToken()` i `_lib/meta.js` og som
 view'et `kanal_med_token` i migration 0004, så app og funktioner svarer ens.
 
 **Må-ikke-lister lægges sammen.** Kundens gælder alle dens brands, brandets
-gælder kun det ene. Jammerbugts regel om samtykke til medarbejderbilleder
+gælder kun det ene. En kundes regel om samtykke til medarbejderbilleder
 skrives ét sted, ikke tre.
 
 **Brands har hver sin stemme.** Hundevask taler ikke som erhvervsrengøring,
@@ -92,7 +100,7 @@ organisation → kunde → brand → kanal
 ```
 
 Organisationen er den der har et abonnement og nogle brugere. Kunden er den
-organisationen laver opslag for. For Jammerbugt er de to det samme; for et
+organisationen laver opslag for. For en enkeltmandsvirksomhed er de to det samme; for et
 bureau ligger der flere kunder under én organisation.
 
 | Rolle | Må |
@@ -117,7 +125,7 @@ ellers var en redaktør reelt ejer så snart hun kaldte API'et med curl.
 
 ```bash
 npm run org                                  # organisationer, kunder og medlemmer
-npm run org:opret "PGU"                      # ny organisation
+npm run org:opret "Dit firma"                # ny organisation
 npm run org:medlem pgu jonn@mail.dk ejer     # giv adgang, eller ret rollen
 npm run org:fjern pgu jonn@mail.dk           # fjern adgangen
 ```

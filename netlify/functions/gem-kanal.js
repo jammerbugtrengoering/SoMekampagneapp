@@ -81,8 +81,10 @@ export default async function handler(req) {
   }
 
   // ---- Gem ----
-  const { kanalId, brandId, platform, visningsnavn, pageId, igUserId, token, tokenLabel, aktiv } =
-    krop
+  const {
+    kanalId, brandId, platform, visningsnavn, pageId, igUserId, authorUrn,
+    token, tokenLabel, aktiv,
+  } = krop
 
   if (!platform || !visningsnavn?.trim()) {
     return jsonSvar({ fejl: 'Platform og visningsnavn skal udfyldes.' }, 400)
@@ -96,6 +98,9 @@ export default async function handler(req) {
     display_name: visningsnavn.trim(),
     page_id: pageId?.trim() || null,
     ig_user_id: igUserId?.trim() || null,
+    // LinkedIn skriver som en URN, ikke som et Page ID. Feltet er tomt for
+    // Facebook og Instagram, og det er meningen.
+    author_urn: authorUrn?.trim() || null,
     active: aktiv !== false,
   }
 

@@ -21,12 +21,27 @@ export function laesEnv() {
   return ud
 }
 
+/**
+ * Adgangstokenet til Supabases management-API.
+ *
+ * Miljøet først, så .env. Rækkefølgen betyder noget: skal man køre mod et
+ * andet projekt én gang, sætter man variablen foran kommandoen og behøver
+ * ikke røre filen.
+ *
+ * .env med som mulighed, fordi `export` kun lever i det ene vindue. Man
+ * sætter tokenet, det virker, man lukker terminalen -- og næste gang
+ * fejler db:setup med en besked man skal lede efter betydningen af. Filen
+ * er gitignoreret og har i forvejen de andre nøgler.
+ */
 export function kraevToken() {
-  const t = process.env.SUPABASE_ACCESS_TOKEN
+  const t = process.env.SUPABASE_ACCESS_TOKEN || laesEnv().SUPABASE_ACCESS_TOKEN
   if (!t) {
     throw new Error(
       'SUPABASE_ACCESS_TOKEN mangler.\n' +
-        'Hent et token på https://supabase.com/dashboard/account/tokens og kør:\n' +
+        'Hent et token på https://supabase.com/dashboard/account/tokens.\n' +
+        'Skriv det i .env, så det huskes:\n' +
+        '  SUPABASE_ACCESS_TOKEN=sbp_...\n' +
+        'Eller sæt det kun for denne terminal:\n' +
         '  export SUPABASE_ACCESS_TOKEN=sbp_...',
     )
   }

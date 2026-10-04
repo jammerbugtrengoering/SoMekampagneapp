@@ -1,4 +1,5 @@
 import { dekrypter } from './krypto.js'
+import { testLinkedIn, udgivLinkedIn } from './linkedin.js'
 import { tørkørsel } from './miljo.js'
 
 /**
@@ -170,11 +171,7 @@ async function udgivInstagram(kanal, token, opslag) {
 const UDGIVERE = {
   facebook: udgivFacebook,
   instagram: udgivInstagram,
-  linkedin: async () => {
-    // LinkedIn vil have billedet uploadet til sig først, modsat Meta der selv
-    // henter fra en URL. Det er reelt arbejde, ikke bare en ekstra streng.
-    throw new GraphFejl('LinkedIn-publicering er ikke implementeret endnu.')
-  },
+  linkedin: udgivLinkedIn,
 }
 
 /**
@@ -187,7 +184,24 @@ const UDGIVERE = {
  * Reglen står også som view'et kanal_med_token i migration 0004, så appen og
  * funktionerne svarer ens.
  */
+/**
+ * LinkedIn-tokenet hører ikke i channels.token_ciphertext.
+ *
+ * Det er fire værdier med to udløbsdatoer og bor i sin egen tabel, hentet
+ * med ind via kunden. PostgREST giver en indlejret relation som array
+ * eller objekt alt efter hvordan den læses — begge former tages her, så
+ * kaldstedet ikke skal vide hvilken det blev.
+ */
+export function linkedinRaekke(kanal) {
+  const r = kanal?.brands?.customers?.linkedin_tokens ?? kanal?.linkedin_tokens
+  return Array.isArray(r) ? (r[0] ?? null) : (r ?? null)
+}
+
 export function gaeldendeToken(kanal) {
+  // LinkedIn arver ikke kanal → kunde som Meta gør. Autorisationen hører
+  // til det menneske der gav den, og den ligger på kunden.
+  if (kanal?.platform === 'linkedin') return linkedinRaekke(kanal)?.access_ciphertext ?? null
+
   return kanal?.token_ciphertext ?? kanal?.brands?.customers?.token_ciphertext ?? null
 }
 
@@ -215,6 +229,19 @@ export async function publicerTilKanal(kanal, opslag) {
   if (!kanal.active) return { ...grund, fejl: 'Kanalen er slået fra.' }
   if (!kanal.token_ciphertext) {
     return { ...grund, fejl: 'Hverken kanalen eller kunden har et token.' }
+  }
+
+  // Et udløbet LinkedIn-token giver en 401 der ligner en rettighedsfejl.
+  // Datoen står i basen, så spørgsmålet kan stilles uden et netværkskald —
+  // og svaret kan sige hvad man skal gøre ved det.
+  if (kanal.platform === 'linkedin') {
+    const r = linkedinRaekke(kanal)
+    if (r?.access_udloeber && new Date(r.access_udloeber).getTime() < Date.now()) {
+      return {
+        ...grund,
+        fejl: 'LinkedIn-adgangen er udløbet. Forbind kunden igen under Kunder → LinkedIn.',
+      }
+    }
   }
 
   let token
@@ -252,6 +279,8 @@ export async function testKanal(kanal) {
       return { ok: true, navn: svar.name }
     }
 
+    if (kanal.platform === 'linkedin') return testLinkedIn(kanal, token)
+
     return { ok: false, fejl: 'Platformen understøttes ikke endnu.' }
   } catch (e) {
     return { ok: false, fejl: e.message }
@@ -273,13 +302,49 @@ export async function publicerOpslag(klient, opslagId) {
 
   // Kundens token hentes med, så en kanal uden eget token kan låne det.
   // Ét systemtoken dækker typisk alle sider i samme Business-portefølje.
-  const { data: maal } = await klient
+  // ALLE maal hentes, ikke kun de ventende. Forskellen paa «opslaget har
+  // ingen kanaler» og «kanalerne er allerede sendt» er to vidt forskellige
+  // tilstande, og filtrerede vi dem sammen, blev de begge til en tom liste
+  // -- og en tom liste blev til et opslag der laa og blev sprunget over
+  // hvert kvarter, resten af sin levetid, uden at nogen fik det at vide.
+  const { data: alleMaal } = await klient
     .from('post_targets')
-    .select('*, channels(*, brands(customers(token_ciphertext)))')
+    .select(
+      '*, channels(*, brands(customers(token_ciphertext, ' +
+        'linkedin_tokens(access_ciphertext, access_udloeber))))',
+    )
     .eq('post_id', opslagId)
-    .in('status', ['pending', 'failed'])
 
-  if (!maal?.length) return []
+  // Et opslag uden en eneste kanalraekke er ikke forsinket -- det er sat
+  // forkert op, og det bliver aldrig bedre af at proeve igen. Det sker naar
+  // modellen foreslog en kanal kunden ikke har, eller kanalen var slaaet fra
+  // da serien blev oprettet.
+  if (!alleMaal?.length) {
+    throw new Error(
+      'Opslaget har ingen kanaler at publicere til. Vælg kanaler under ' +
+        '«Ret kampagnen → Kanaler», eller tjek at kundens kanaler er slået til.',
+    )
+  }
+
+  const maal = alleMaal.filter((m) => m.status === 'pending' || m.status === 'failed')
+
+  // Alt er allerede ude. Sket fx hvis en koersel blev afbrudt efter kanalerne
+  // var opdateret men foer opslaget blev det. Statussen rettes her frem for
+  // at opslaget bliver ved at staa som godkendt og forfaldent for evigt.
+  if (!maal.length) {
+    const alleUde = alleMaal.every((m) => m.status === 'published')
+    if (alleUde && !tørkørsel()) {
+      await klient.from('posts').update({ status: 'published' }).eq('id', opslagId)
+    }
+    return alleMaal.map((m) => ({
+      ok: m.status === 'published',
+      platform: m.channels?.platform,
+      kanalId: m.channel_id,
+      kanalNavn: m.channels?.display_name,
+      fejl: m.status === 'published' ? undefined : `Kanalen står som «${m.status}».`,
+      alleredeBehandlet: true,
+    }))
+  }
 
   // Tørkørsel må ikke efterlade spor. Markerede vi opslaget som publiceret,
   // ville kalenderen lyve OG opslaget blive sprunget over den dag du går live,

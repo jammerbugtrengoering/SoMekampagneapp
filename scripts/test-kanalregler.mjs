@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { REGLER, fuldTekst, klip, tjekOpslag } from "../src/kanalregler.js";
+import { REGLER, foersteSaetning, fuldTekst, klip, tjekKrog, tjekOpslag } from "../src/kanalregler.js";
 
 let fejlede = 0;
 const test = (navn, fn) => {
@@ -126,6 +126,50 @@ test("mobil klipper tidligere end computer på Facebook", () => {
 
 test("Instagram klipper ved 125 tegn", () => {
   assert.equal(REGLER.instagram.klipMobil, 125);
+});
+
+console.log("\nKrogen");
+
+const grader = (t, p = "facebook") => tjekKrog(t, p).map((a) => a.grad);
+const tekster = (t, p = "facebook") => tjekKrog(t, p).map((a) => a.tekst).join(" ");
+
+test("første sætning findes uanset tegnsætning", () => {
+  assert.equal(foersteSaetning("Vi kom klokken seks. Så gik vi i gang."), "Vi kom klokken seks.");
+  assert.equal(foersteSaetning("Hvem tager fugerne?\nDet gør vi."), "Hvem tager fugerne?");
+  assert.equal(foersteSaetning("Uden punktum overhovedet"), "Uden punktum overhovedet");
+  assert.equal(foersteSaetning(""), "");
+});
+
+test("standardåbninger fanges", () => {
+  assert.ok(grader("Vidste du at gulve slides hurtigere om vinteren? Det gør de.").includes("advarsel"));
+  assert.ok(grader("I en verden hvor alle har travlt, glemmer man rengøringen.").includes("advarsel"));
+  assert.ok(grader("Vi er glade for at kunne fortælle at vi har fået ny bil.").includes("advarsel"));
+});
+
+// Den vigtigste: en konkret krog må ikke give udslag, ellers bliver
+// advarslerne støj man lærer at klikke væk.
+test("en konkret krog giver ingen advarsler", () => {
+  assert.deepEqual(grader("Vi gjorde 400 kvadratmeter rent i Hjørring på en aften."), []);
+  assert.deepEqual(grader("Synsrapporten faldt over fugerne bag toilettet."), []);
+});
+
+test("en krog der er længere end klippet fanges", () => {
+  const lang = `${"Vi gør rent for kontorer i hele Nordjylland og omegn og har gjort det siden 1998 ".repeat(3)}.`;
+  assert.ok(tekster(lang).includes("klippet midt over"));
+});
+
+test("en krog uden holdepunkt giver en note, ikke en advarsel", () => {
+  const g = grader("det handler i sidste ende om at man skal kunne stole på den man lukker ind");
+  assert.ok(g.includes("note"));
+  assert.ok(!g.includes("advarsel"));
+});
+
+test("krogtjekket kommer med ud af tjekOpslag", () => {
+  const a = tjekOpslag(
+    { body: "Vidste du at gulve slides? Ring 43 22 18 04.", hashtags: [], image_url: "x" },
+    "facebook",
+  );
+  assert.ok(a.some((x) => /standardåbning/.test(x.tekst)));
 });
 
 console.log(fejlede === 0 ? "\nAlle tests bestået.\n" : `\n${fejlede} test(s) fejlede.\n`);

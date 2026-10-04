@@ -44,12 +44,18 @@ const VAERKTOEJ = {
               type: 'array',
               items: { type: 'string', enum: ['facebook', 'instagram', 'linkedin'] },
             },
+            krog_alt: {
+              type: 'string',
+              description:
+                'En ANDEN første linje til samme opslag. Samme indhold, andet greb — ' +
+                'ikke en omskrivning med andre ord. To varianter der ligner hinanden er intet valg.',
+            },
             hvorfor: {
               type: 'string',
               description: 'Én sætning om hvorfor dette opslag på dette tidspunkt.',
             },
           },
-          required: ['tekst', 'hashtags', 'billedbrief', 'dag', 'klokke', 'kanaler'],
+          required: ['tekst', 'krog_alt', 'hashtags', 'billedbrief', 'dag', 'klokke', 'kanaler'],
         },
       },
     },
@@ -63,6 +69,10 @@ Du skriver opslag der lyder som om et menneske fra virksomheden har skrevet dem.
 - Ingen "🚀 Spændende nyheder!" eller anden LinkedIn-plastik.
 - Ingen tomme superlativer. Sig noget konkret eller lad være.
 - Variér længde og form hen over serien. Ikke alle opslag skal have samme rytme.
+
+VÆLG EN TYPE PER OPSLAG, og brug ikke samme type to gange i træk:
+kundehistorie · bag om arbejdet · fagligt tip · sæsonaktuelt · spørgsmål · modsvar · tal.
+«Variér» uden en liste bliver til syv opslag der ligner hinanden. Vælg bevidst.
 - Skriv på dansk. Undgå anglicismer hvor der findes et dansk ord.
 
 Tilpas til kanalen: Facebook tåler længere tekst og en historie. Instagram er kortere og båret af billedet. LinkedIn er fagligt og henvender sig til beslutningstagere.
@@ -76,7 +86,13 @@ function brandBriefing(brand) {
     `Virksomhed: ${brand.name}`,
     brand.description && `Hvad de laver: ${brand.description}`,
     brand.target_audience && `Målgruppe: ${brand.target_audience}`,
+    brand.maalgruppe_ved &&
+      `Det ved målgruppen allerede — forklar det ikke forfra:\n${brand.maalgruppe_ved}`,
+    brand.maalgruppe_undgaa &&
+      `Det er de trætte af at høre — find en anden vinkel:\n${brand.maalgruppe_undgaa}`,
     brand.tone_of_voice && `Tone of voice: ${brand.tone_of_voice}`,
+    brand.eksempel_opslag &&
+      `SÅDAN LYDER DE, NÅR DET ER GODT. Ram stemmen — kopiér ikke indholdet:\n${brand.eksempel_opslag}`,
     brand.guardrails && `MÅ IKKE: ${brand.guardrails}`,
   ]
     .filter(Boolean)

@@ -1,5 +1,5 @@
 {
-  "name": "somekampagneapp",
+  "name": "kampagneapp",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -16,17 +16,22 @@
     "kanaler": "node scripts/kanal.mjs --liste",
     "db:setup": "node scripts/setup-db.mjs",
     "admin:add": "node scripts/admin-add.mjs",
-    "test": "npm run test:publicering && npm run test:kanalregler && npm run test:omskrivning",
+    "test": "npm run test:publicering && npm run test:kanalregler && npm run test:omskrivning && npm run test:linkedin && npm run test:billeder && npm run test:planlagt && npm run test:artikel && npm run test:hjaelp",
     "test:publicering": "node scripts/test-publicering.mjs",
     "test:kanalregler": "node scripts/test-kanalregler.mjs",
     "test:omskrivning": "node scripts/test-omskrivning.mjs",
+    "test:linkedin": "node scripts/test-linkedin-state.mjs",
     "admin:list": "node scripts/admin-add.mjs --liste",
     "admin:remove": "node scripts/admin-add.mjs --fjern",
     "test:adskillelse": "node scripts/test-adskillelse.mjs",
     "org": "node scripts/org.mjs",
     "org:opret": "node scripts/org.mjs --opret",
     "org:medlem": "node scripts/org.mjs --medlem",
-    "org:fjern": "node scripts/org.mjs --fjern"
+    "org:fjern": "node scripts/org.mjs --fjern",
+    "test:billeder": "node scripts/test-billedudbyder.mjs",
+    "test:planlagt": "node scripts/test-planlagt.mjs",
+    "test:artikel": "node scripts/test-artikel.mjs",
+    "test:hjaelp": "node scripts/test-hjaelp.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",

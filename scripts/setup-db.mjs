@@ -27,7 +27,7 @@ create table if not exists public.schema_migrations (
 async function main() {
   const token = kraevToken()
   const env = laesEnv()
-  const ref = await findProjektRef(token, 'SoMePlanning App')
+  const ref = await findProjektRef(token, process.env.SUPABASE_PROJECT_NAVN ?? 'Kampagneapp')
 
   console.log(`Projekt: ${ref}\n`)
 
@@ -60,13 +60,32 @@ async function main() {
   console.log(antal ? `\n${antal} migration(er) kørt.` : '\nSkemaet var allerede opdateret.')
 
   // --- Seed ---
-  const kunder = await koerSql(ref, token, 'select count(*)::int as n from public.brands;')
-  if ((kunder?.[0]?.n ?? 0) > 0) {
-    console.log(`Seed sprunget over — der er allerede ${kunder[0].n} kunde(r).`)
-  } else if (existsSync(SEED)) {
-    process.stdout.write('Seeder de to kunder … ')
+  //
+  // Seeden køres ÉN gang, nogensinde, og noteres i schema_migrations som
+  // alt andet. Den talte tidligere brands for at afgøre om den skulle
+  // køre, og blev så sat til altid at køre, så den kunne samle
+  // forældreløse brands op. Begge dele var forkerte:
+  //
+  // Tæller man brands, springer seeden over på en base hvor der ligger
+  // brands uden kunde — og det var netop dér der var noget at reparere.
+  // Kører man altid, kommer demokunderne tilbage hver gang nogen kører
+  // db:setup. Også dem der var slettet med vilje. Det er værre: en seed
+  // der genopliver data, er en seed man ikke tør køre.
+  //
+  // Reparationen bor derfor i migration 0011, hvor den hører hjemme, og
+  // seeden gør kun det en seed skal: fylder en tom base.
+  const SEED_MAERKE = 'seed.sql'
+  if (existsSync(SEED) && !koerte.has(SEED_MAERKE)) {
+    process.stdout.write('Seeder kunder og brands (kun første gang) … ')
     await koerSql(ref, token, readFileSync(SEED, 'utf8'))
+    await koerSql(
+      ref,
+      token,
+      `insert into public.schema_migrations (version) values ('${SEED_MAERKE}');`,
+    )
     console.log('ok')
+  } else if (existsSync(SEED)) {
+    console.log('Seed sprunget over — den er kørt før.')
   }
 
   // --- Storage ---

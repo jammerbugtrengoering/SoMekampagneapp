@@ -70,6 +70,111 @@ export function klip(tekst, graense) {
   };
 }
 
+/* ---------------------------------------------------------------------
+   Krogen: den første sætning.
+
+   Den afgør om resten bliver læst, og den er samtidig det eneste stykke
+   tekst der med sikkerhed bliver vist. Alligevel er den ofte opvarmning
+   — en generel betragtning der kunne stå over ethvert opslag fra enhver
+   branche.
+
+   Tjekket er groft med vilje. Det kan ikke afgøre om en krog er god, kun
+   om den har nogen af de træk der plejer at gøre den dårlig. Det er
+   stadig bedre end ingenting, for det er altid den samme slags fejl.
+   --------------------------------------------------------------------- */
+
+// Åbninger der ikke siger noget. Fælles for dem: de kunne stå foran hvad
+// som helst, og læseren ved efter dem præcis lige så meget som før.
+const KLICHEER = [
+  /^vidste du/i,
+  /^i en (verden|tid) hvor/i,
+  /^som (de fleste|mange) ved/i,
+  /^der er ingen tvivl om/i,
+  /^vi er (glade|stolte) (for|over)/i,
+  /^hos os (er|har|tror)/i,
+  /^det er vigtigt at/i,
+  /^i dagens/i,
+  /^når det kommer til/i,
+  // De engelske. Uden dem ville en engelsk kampagne se ud til at blive
+  // kontrolleret uden at blive det: reglerne ovenfor rammer aldrig, og en
+  // krog der starter «Did you know» ville gå igennem uden en bemærkning.
+  /^did you know/i,
+  /^in a (world|time) where/i,
+  /^as (most|many) (of you )?know/i,
+  /^there('s| is) no doubt/i,
+  /^we('re| are) (excited|proud|thrilled)/i,
+  /^at .{2,30}, we (believe|know|think)/i,
+  /^it('s| is) important to/i,
+  /^in today('s)?/i,
+  /^when it comes to/i,
+  /^let('s| us) (be honest|face it|talk about)/i,
+];
+
+/** Første sætning — punktum, spørgsmålstegn, udråb eller linjeskift. */
+export function foersteSaetning(tekst) {
+  const t = (tekst ?? "").trim();
+  if (!t) return "";
+  const m = t.match(/^[\s\S]*?[.!?](\s|$)|^[^\n]+/);
+  return (m ? m[0] : t).trim();
+}
+
+/**
+ * Har krogen noget at holde fast i?
+ *
+ * Et tal, et navn, et sted, et citat. Første ord tæller ikke: det står
+ * altid med stort.
+ */
+function harHoldepunkt(saetning) {
+  if (/\d/.test(saetning)) return true;
+  if (/[«»""\u201C\u201D]/.test(saetning)) return true;
+  const efterFoerste = saetning.split(/\s+/).slice(1).join(" ");
+  return /[A-ZÆØÅ]/.test(efterFoerste);
+}
+
+/**
+ * Ord der gør en sætning almen.
+ *
+ * Fraværet af et tal eller et navn er IKKE i sig selv et problem —
+ * «Synsrapporten faldt over fugerne bag toilettet» har ingen af delene og
+ * er alligevel så konkret som det bliver. Det der gør en krog til en
+ * betragtning, er at den taler om alle og ingen. Derfor kræves begge dele
+ * før der siges noget: intet holdepunkt OG et alment greb.
+ */
+const ALMENT = /\b(man|alle|enhver|ingen|altid|aldrig|ofte|som regel|i sidste ende|når det gælder|det handler om|de fleste|everyone|anyone|no one|nobody|always|never|often|usually|at the end of the day|when it comes to|it('s| is) all about|most people)\b/i;
+
+/** Advarsler om krogen alene. Bruges af tjekOpslag. */
+export function tjekKrog(tekst, platform) {
+  const r = REGLER[platform];
+  const krog = foersteSaetning(tekst);
+  const ud = [];
+  if (!krog) return ud;
+
+  if (KLICHEER.some((k) => k.test(krog))) {
+    ud.push({
+      grad: "advarsel",
+      tekst: "Krogen er en standardåbning. Den kunne stå foran et hvilket som helst opslag — begynd hellere med det konkrete.",
+    });
+  }
+
+  // Er selve krogen længere end klippet, når læseren ikke engang frem til
+  // dens pointe før «Se mere».
+  if (r && krog.length > r.klipMobil) {
+    ud.push({
+      grad: "advarsel",
+      tekst: `Første sætning fylder ${krog.length} tegn — mere end de ${r.klipMobil} der vises. Den bliver klippet midt over.`,
+    });
+  }
+
+  if (!harHoldepunkt(krog) && ALMENT.test(krog) && krog.length > 45) {
+    ud.push({
+      grad: "note",
+      tekst: "Krogen taler om alle og ingen, og har hverken tal, navn eller sted at holde fast i. Den læses som en generel betragtning.",
+    });
+  }
+
+  return ud;
+}
+
 /**
  * Ting der er værd at vide før opslaget går ud.
  *
@@ -119,6 +224,8 @@ export function tjekOpslag(opslag, platform) {
       });
     }
   }
+
+  advarsler.push(...tjekKrog(opslag.body, platform));
 
   if (platform === "instagram" && !antalTags) {
     advarsler.push({

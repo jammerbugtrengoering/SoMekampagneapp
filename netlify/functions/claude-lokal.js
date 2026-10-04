@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import {
-  KAMPAGNE_SKEMA, OMSKRIV_SKEMA, byggOmskrivOpgave, byggOpgave,
+  ARTIKEL_SKEMA, COVER_SKEMA, KAMPAGNE_SKEMA, OMSKRIV_SKEMA,
+  byggArtikelOpgave, byggCoverOpgave, byggOmskrivOpgave, byggOpgave,
 } from '../../src/prompt.js'
 import { jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
 
@@ -114,20 +115,55 @@ export default async function handler(req) {
 
   try {
     if (handling === 'omskriv') {
-      const { brand, kampagne, opslag, instruks } = krop
+      const { brand, kampagne, opslag, instruks, arketype, sprog, retningslinjer } = krop
       if (!brand || !opslag?.length || !instruks?.trim()) {
         return jsonSvar({ fejl: 'brand, opslag og instruks skal med.' }, 400)
       }
       const svar = await koerClaude(
-        byggOmskrivOpgave({ brand, kampagne, opslag, instruks: instruks.trim() }),
+        // Afsender, sprog og retningslinjer skal med. Uden dem skrev en
+        // omskrivning med de indbyggede retningslinjer og uden rolle --
+        // og en engelsk serie kom tilbage paa dansk.
+        byggOmskrivOpgave({
+          brand, kampagne, opslag, instruks: instruks.trim(),
+          arketype, sprog, retningslinjer,
+        }),
         OMSKRIV_SKEMA,
         process.env.CLAUDE_MODEL,
       )
       return jsonSvar({ ok: true, resultat: svar })
     }
 
+    if (handling === 'cover') {
+      const { brand, artikel, arketype } = krop
+      if (!brand || !artikel?.trim()) {
+        return jsonSvar({ fejl: 'brand og artikel skal med.' }, 400)
+      }
+      const svar = await koerClaude(
+        byggCoverOpgave({ brand, artikel, arketype }),
+        COVER_SKEMA,
+        process.env.CLAUDE_MODEL,
+      )
+      return jsonSvar({ ok: true, resultat: svar })
+    }
+
+    if (handling === 'artikel') {
+      const { brand, kampagne, opslag, arketype, sprog, retningslinjer, instruks } = krop
+      if (!brand || !kampagne || !opslag?.length) {
+        return jsonSvar({ fejl: 'brand, kampagne og opslag skal med.' }, 400)
+      }
+      const svar = await koerClaude(
+        byggArtikelOpgave({ brand, kampagne, opslag, arketype, sprog, retningslinjer, instruks }),
+        ARTIKEL_SKEMA,
+        process.env.CLAUDE_MODEL,
+      )
+      return jsonSvar({ ok: true, resultat: svar })
+    }
+
     if (handling === 'generer') {
-      const { brand, navn, brief, maal, antal, kanaler, start, slut } = krop
+      const {
+        brand, navn, brief, maal, antal, kanaler, start, slut,
+        arketype, strategi, vinkler, sprog, retningslinjer, rettelser,
+      } = krop
       if (!brand || !navn?.trim() || !brief?.trim() || !kanaler?.length) {
         return jsonSvar({ fejl: 'brand, navn, brief og kanaler skal med.' }, 400)
       }
@@ -136,6 +172,10 @@ export default async function handler(req) {
           brand, navn: navn.trim(), brief: brief.trim(), maal: maal ?? '',
           antal: Math.min(Math.max(Number(antal) || 5, 1), 20),
           kanaler, start, slut: slut ?? '',
+          // Afsender, retningslinjer og lærte rettelser kommer fra browseren.
+          // De er ikke hemmeligheder, og at hente dem igen her ville betyde
+          // to steder der kan blive uenige om hvad der gælder.
+          arketype, strategi, vinkler, sprog, retningslinjer, rettelser,
         }),
         KAMPAGNE_SKEMA,
         process.env.CLAUDE_MODEL,

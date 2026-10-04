@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle, Calendar, Check, ChevronLeft, ChevronRight, Eye,
-  Image as ImageIcon, Loader2, LogOut, Plus, RefreshCw, Send, Sparkles,
-  Pencil, Trash2, UserPlus, Users, X,
+  AlertTriangle, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight,
+  ChevronUp, Eye, FileText, HelpCircle, Image as ImageIcon, Loader2, LogOut,
+  Plus, RefreshCw, Send, Sparkles, Pencil, Trash2, UserPlus, Users, X,
 } from "lucide-react";
 import { supabase, kaldApi, opsaetningsfejl } from "./supabaseClient";
 import {
-  FORMATER, base64TilBlob, foersteLinje, tegnSkabelon, uploadBillede,
+  FORMATER, base64TilBlob, foersteLinje, tegnSkabelon, tilpasFormat, uploadBillede,
 } from "./billeder";
+import { foersteSaetning } from "./kanalregler";
 import {
-  byggOmskrivPrompt, byggPrompt, flytDage, laesOmskrivning, laesOpslag, tidspunkt,
+  SPROG, STANDARD_RETNINGSLINJER, byggArtikelPrompt, byggCoverPrompt, byggOmskrivPrompt,
+  byggPrompt, flytDage, gaeldendeRetningslinjer, laesArtikel, laesCoverBrief,
+  laesOmskrivning, laesOpslag, tidspunkt,
 } from "./prompt";
 import { REGLER, fuldTekst, klip, tjekOpslag } from "./kanalregler";
+import { HJAELP, HJAELP_STANDARD } from "./hjaelp";
 
 /* =====================================================================
    Kampagneapp — planlægger og publicerer opslag for flere kunder.
@@ -35,6 +39,45 @@ const STATUS = {
 };
 
 const PLATFORM = { facebook: "Facebook", instagram: "Instagram", linkedin: "LinkedIn" };
+
+/**
+ * De seneste steder hvor en tekst blev rettet, før den gik ud.
+ *
+ * Forskellen mellem det modellen skrev og det du godkendte er den mest
+ * præcise beskrivelse af stemmen der findes — mere præcis end noget
+ * adjektiv i brandprofilen, fordi den er et valg og ikke en hensigt.
+ *
+ * Kun brandets egne: hundevask lyder ikke som erhvervsrengøring, og at
+ * blande dem ville lære modellen en gennemsnitsstemme ingen har.
+ */
+/**
+ * Bytter første sætning ud med en anden, og lader resten stå.
+ *
+ * Krogen er første sætning, ikke første afsnit — derfor skæres der ved
+ * sætningsgrænsen og ikke ved linjeskiftet. Findes der ingen grænse, er
+ * hele teksten krogen, og så erstattes den.
+ */
+function byttKrog(tekst, nyKrog) {
+  const t = (tekst ?? "").trim();
+  const gammel = foersteSaetning(t);
+  if (!gammel) return nyKrog;
+  return `${nyKrog.trim()}${t.slice(gammel.length)}`;
+}
+
+async function hentRettelser(brandId) {
+  if (!brandId) return [];
+  const { data } = await supabase
+    .from("posts")
+    .select("body, body_original, created_at")
+    .eq("brand_id", brandId)
+    .not("body_original", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(40);
+
+  return (data ?? [])
+    .filter((o) => o.body?.trim() && o.body.trim() !== o.body_original?.trim())
+    .map((o) => ({ foer: o.body_original, efter: o.body }));
+}
 const PLATFORM_KORT = { facebook: "FB", instagram: "IG", linkedin: "LI" };
 
 const UGEDAGE = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
@@ -107,12 +150,43 @@ function tilInputVaerdi(iso) {
   return `${datoNoegle(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Kort tidspunkt til mærkaterne: «19. sep 08:02». */
+function visKortTid(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("da-DK", {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
 function visTid(iso) {
   if (!iso) return "Ikke planlagt";
   return new Date(iso).toLocaleString("da-DK", {
     weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
   });
 }
+
+/**
+ * Filtrene på kampagnesiden.
+ *
+ * «Afventer» dækker både kladde og needs_approval, for set fra den der
+ * skal godkende er de det samme: noget der ikke er sluppet igennem endnu.
+ * Forskellen betyder noget i databasen, ikke i hovedet på den der sidder
+ * med listen.
+ *
+ * Fejlede står for sig. De ligner publicerede i status, men kræver
+ * modsat dem at nogen gør noget.
+ */
+const FILTRE = [
+  ["alle", "Alle", () => true],
+  ["afventer", "Afventer", (o) => o.status === "draft" || o.status === "needs_approval"],
+  ["godkendt", "Godkendt", (o) => o.status === "approved" || o.status === "publishing"],
+  ["publiceret", "Publiceret", (o) => o.status === "published"],
+  ["fejlet", "Fejlet", (o) => o.status === "failed"],
+];
+
+// Kan opslaget godkendes? Et publiceret opslag kan ikke trækkes tilbage
+// ved at ændre en status -- det ER ude.
+const kanGodkendes = (o) => o.status === "draft" || o.status === "needs_approval";
 
 const manglerBillede = (opslag) =>
   !opslag.image_url && (opslag.maal ?? []).some((m) => m.platform === "instagram");
@@ -334,6 +408,11 @@ function Kampagneapp({ session, onLogUd }) {
   const [side, setSide] = useState("kalender");
   const [maaned, setMaaned] = useState(() => maanedNoegle(new Date()));
   const [valgtKampagne, setValgtKampagne] = useState(null);
+  // Klikker man et opslag i kalenderen, skal man lande på DET opslag, ikke i
+  // toppen af kampagnen. Værdien bærer et løbenummer med: klikker man samme
+  // opslag to gange, skal effekten i Kampagner køre igen, og det gør den kun
+  // hvis værdien faktisk er en ny.
+  const [fokusOpslag, setFokusOpslag] = useState(null);
   const [valgtKunde, setValgtKunde] = useState(null);
 
   const [kunder, setKunder] = useState([]);
@@ -346,11 +425,36 @@ function Kampagneapp({ session, onLogUd }) {
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
 
+  // Ref frem for visToast direkte: effekten nedenfor skal køre præcis én
+  // gang ved indlæsning, og en afhængighed på visToast ville binde den til
+  // en funktion der kan skifte identitet.
+  const visToastRef = useRef(() => {});
+
+  // Browseren kommer tilbage fra LinkedIn med resultatet i adresselinjen.
+  // Det vises én gang, og parametrene fjernes bagefter — ellers dukker
+  // beskeden op igen hver gang siden genindlæses.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const r = p.get("linkedin");
+    if (!r) return;
+    if (r === "ok") {
+      const navn = p.get("navn");
+      visToastRef.current(`LinkedIn forbundet${navn ? ` — ${navn}` : ""}.`);
+    } else if (r === "afbrudt") {
+      visToastRef.current("LinkedIn-forbindelsen blev afbrudt.", false);
+    } else {
+      visToastRef.current(p.get("besked") ?? "LinkedIn-forbindelsen fejlede.", false);
+    }
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
   const visToast = useCallback((tekst, ok = true) => {
     setToast({ tekst, ok });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 5000);
   }, []);
+
+  visToastRef.current = visToast;
 
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
@@ -360,17 +464,22 @@ function Kampagneapp({ session, onLogUd }) {
   // mine_organisationer er en visning der kun viser det man er medlem af,
   // med rollen på. Den erstatter det gamle opslag i app_admins, som en
   // godkender aldrig kommer til at stå i.
-  useEffect(() => {
-    supabase
-      .from("mine_organisationer")
-      .select("*")
-      .order("name")
-      .then(({ data }) => {
-        const liste = data ?? [];
-        setOrgs(liste);
-        setOrgId((nu) => nu ?? liste[0]?.id ?? null);
-      });
-  }, [session.user.id]);
+  //
+  // Den skal kunne kaldes igen. Retningslinjerne og de andre felter paa
+  // organisationen bliver rettet inde i appen, og hentede vi kun ved login,
+  // stod skaermen med den gamle tekst indtil brugeren genindlaeste siden --
+  // mens databasen laengst havde den nye. Det gemte ser ud til at vaere
+  // gaaet tabt, og det er den vaerste slags fejl: den der ligner at
+  // arbejdet forsvandt.
+  const hentOrgs = useCallback(async () => {
+    const { data } = await supabase
+      .from("mine_organisationer").select("*").order("name");
+    const liste = data ?? [];
+    setOrgs(liste);
+    setOrgId((nu) => nu ?? liste[0]?.id ?? null);
+  }, []);
+
+  useEffect(() => { hentOrgs(); }, [hentOrgs, session.user.id]);
 
   const org = orgs?.find((o) => o.id === orgId) ?? orgs?.[0] ?? null;
   const rolle = org?.rolle ?? null;
@@ -381,13 +490,17 @@ function Kampagneapp({ session, onLogUd }) {
    * Henter alt der hører til den valgte organisation.
    *
    * Basen ville i forvejen kun give os det vi må se, men er man med i to
-   * organisationer, må skærmen vise én ad gangen — ellers står Jammerbugts
+   * organisationer, må skærmen vise én ad gangen — ellers står den ene organisations
    * og PGU's kampagner mellem hinanden i kalenderen. Derfor filtreres der
    * ned gennem kæden: kunde → brand → resten.
    */
   const hentAlt = useCallback(async () => {
     if (!orgId) return;
     setHenter(true);
+
+    // Organisationen foerst: den baerer retningslinjerne, og de bruges i
+    // hver eneste prompt.
+    await hentOrgs();
 
     const { data: ku } = await supabase
       .from("customers").select("*").eq("organisation_id", orgId).order("name");
@@ -405,7 +518,7 @@ function Kampagneapp({ session, onLogUd }) {
             .order("created_at", { ascending: false }),
           supabase
             .from("posts")
-            .select("*, post_targets(id, status, error, permalink, channel_id, channels(platform, display_name))")
+            .select("*, post_targets(id, status, error, permalink, channel_id, published_at, channels(platform, display_name))")
             .in("brand_id", brandIder)
             .order("scheduled_at", { ascending: true }),
         ])
@@ -424,24 +537,28 @@ function Kampagneapp({ session, onLogUd }) {
           status: m.status,
           fejl: m.error,
           permalink: m.permalink,
+          publiceret: m.published_at,
           platform: m.channels?.platform ?? "?",
           kanalNavn: m.channels?.display_name ?? "",
         })),
       })),
     );
     setHenter(false);
-  }, [orgId]);
+  }, [orgId, hentOrgs]);
 
   useEffect(() => { if (orgId) hentAlt(); }, [orgId, hentAlt]);
 
   // Hvilke sider rollen har. Udregnes under render frem for at rettes i en
   // effect: skifter man organisation og går fra ejer til godkender, ville en
   // effect vise medlemssiden et øjeblik først.
+  // Afsender hører til redaktørens verden: arketyper og retningslinjer er
+  // indhold, ikke adgang. Godkenderen holdes ude — hun skal vurdere det der
+  // kom ud af dem, ikke rette på dem.
   const tilladteSider = rolle === "godkender"
     ? ["kalender", "kampagner"]
     : rolle === "redaktoer"
-      ? ["kalender", "ny", "kampagner", "kunder"]
-      : ["kalender", "ny", "kampagner", "kunder", "medlemmer"];
+      ? ["kalender", "ny", "kampagner", "kunder", "afsender"]
+      : ["kalender", "ny", "kampagner", "kunder", "afsender", "medlemmer"];
   const visSide = tilladteSider.includes(side) ? side : "kalender";
 
   if (orgs === null) {
@@ -512,6 +629,7 @@ function Kampagneapp({ session, onLogUd }) {
             ["ny", "Ny kampagne", Sparkles, kanRedigere],
             ["kampagner", "Kampagner", Send, true],
             ["kunder", "Kunder", Users, kanRedigere],
+            ["afsender", "Afsender", Pencil, kanRedigere],
             ["medlemmer", "Medlemmer", UserPlus, erEjer],
           ].filter(([, , , vis]) => vis).map(([id, mrk, Ikon]) => (
             <button
@@ -548,12 +666,17 @@ function Kampagneapp({ session, onLogUd }) {
           <Kalender
             maaned={maaned} setMaaned={setMaaned} opslag={opslag} brands={brands}
             kanaler={kanaler} mobil={mobil}
-            aabnKampagne={(id) => { setValgtKampagne(id); setSide("kampagner"); }}
+            aabnKampagne={(id, opslagId) => {
+              setValgtKampagne(id);
+              setFokusOpslag(opslagId ? { id: opslagId, nr: Date.now() } : null);
+              setSide("kampagner");
+            }}
             gaaTilNy={() => setSide("ny")}
           />
         ) : visSide === "ny" ? (
           <NyKampagne
-            brands={brands} kanalerFor={kanalerFor} visToast={visToast}
+            brands={brands} kunder={kunder} kanalerFor={kanalerFor} visToast={visToast} org={org}
+            gaaTilKunder={() => setSide("kunder")}
             efterOprettelse={async (id) => {
               await hentAlt();
               setValgtKampagne(id);
@@ -562,11 +685,15 @@ function Kampagneapp({ session, onLogUd }) {
           />
         ) : visSide === "kampagner" ? (
           <Kampagner
+            org={org}
             kampagner={kampagner} opslag={opslag} brands={brands} kunder={kunder}
             brandFor={brandFor} kanalerFor={kanalerFor} rolle={rolle}
             valgt={valgtKampagne} setValgt={setValgtKampagne}
+            fokus={fokusOpslag}
             visToast={visToast} genindlaes={hentAlt}
           />
+        ) : visSide === "afsender" ? (
+          <Afsender org={org} visToast={visToast} genindlaes={hentAlt} />
         ) : visSide === "medlemmer" ? (
           <Medlemmer org={org} session={session} visToast={visToast} />
         ) : (
@@ -578,6 +705,8 @@ function Kampagneapp({ session, onLogUd }) {
           />
         )}
       </main>
+
+      <Hjaelp side={visSide} />
     </div>
   );
 }
@@ -692,7 +821,7 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, mobil, aabnKampa
                   const st = STATUS[o.status] ?? STATUS.draft;
                   return (
                     <button key={o.id} style={{ ...styles.agendaOpslag, borderLeft: `3px solid ${farve}` }}
-                      onClick={() => o.campaign_id && aabnKampagne(o.campaign_id)}>
+                      onClick={() => o.campaign_id && aabnKampagne(o.campaign_id, o.id)}>
                       <div style={styles.agendaTid}>
                         {new Date(o.scheduled_at).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" })}
                         {" · "}
@@ -753,7 +882,7 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, mobil, aabnKampa
                     <button
                       key={o.id}
                       style={{ ...styles.kalChip, borderLeft: `3px solid ${farve}`, background: `${farve}14` }}
-                      onClick={() => o.campaign_id && aabnKampagne(o.campaign_id)}
+                      onClick={() => o.campaign_id && aabnKampagne(o.campaign_id, o.id)}
                     >
                       <span style={styles.kalChipTid}>
                         {new Date(o.scheduled_at).toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" })}
@@ -774,7 +903,7 @@ function Kalender({ maaned, setMaaned, opslag, brands, kanaler, mobil, aabnKampa
                   <button style={{ ...styles.kalFlere, border: "none", background: "none",
                     textAlign: "left", cursor: "pointer", font: "inherit", fontSize: 10.5,
                     color: "#64748B" }}
-                    onClick={() => liste[3]?.campaign_id && aabnKampagne(liste[3].campaign_id)}>
+                    onClick={() => liste[3]?.campaign_id && aabnKampagne(liste[3].campaign_id, liste[3].id)}>
                     +{flere} mere
                   </button>
                 )}
@@ -812,11 +941,141 @@ function Nøgletal({ mrk, tal, advarsel, kritisk }) {
    Ny kampagne
    ===================================================================== */
 
-function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
-  const [brandId, setBrandId] = useState(brands[0]?.id ?? "");
-  const [navn, setNavn] = useState("");
-  const [brief, setBrief] = useState("");
-  const [maal, setMaal] = useState("");
+/**
+ * Sprogvalget.
+ *
+ * Et opslag paa LinkedIn naar laengere paa engelsk naar emnet er fagligt
+ * og publikummet ikke stopper ved graensen. Det gaelder ikke Facebook og
+ * Instagram, hvor foelgerne som regel er lokale — derfor er det et valg
+ * per kampagne og ikke en indstilling der gaelder alt.
+ */
+function Sprogvalg({ vaerdi, saetVaerdi, mrk = "Sprog", hjaelp }) {
+  return (
+    <Felt mrk={mrk} bredde={200} hjaelp={hjaelp}>
+      <select style={styles.input} value={vaerdi} onChange={(e) => saetVaerdi(e.target.value)}>
+        {Object.entries(SPROG).map(([kode, s]) => (
+          <option key={kode} value={kode}>{s.navn}</option>
+        ))}
+      </select>
+    </Felt>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   Strategien bag serien.
+
+   Arketypen er hvem der skriver, retningslinjerne er hvordan. Det tredje
+   spørgsmål — hvad er planen med de fem opslag tilsammen — havde ingen
+   plads i appen, og resultatet var fem varianter af det samme opslag.
+
+   To niveauer, fordi det er to beslutninger: kampagnestrategien fordeler
+   serien, vinklerne er grebene i det enkelte opslag.
+   --------------------------------------------------------------------- */
+function useStrategier(orgId) {
+  const [alle, setAlle] = useState([]);
+
+  useEffect(() => {
+    if (!orgId) return undefined;
+    let afbrudt = false;
+    supabase.from("strategier").select("*").eq("organisation_id", orgId)
+      .eq("aktiv", true).order("sortering").order("navn")
+      .then(({ data }) => { if (!afbrudt) setAlle(data ?? []); });
+    return () => { afbrudt = true; };
+  }, [orgId]);
+
+  return useMemo(() => ({
+    planer: alle.filter((s) => s.niveau === "kampagne"),
+    vinkler: alle.filter((s) => s.niveau === "vinkel"),
+  }), [alle]);
+}
+
+/**
+ * Vinklerne som afkrydsning.
+ *
+ * Bevidst ikke en multi-select: de ti navne siger ikke sig selv, og et
+ * valg man ikke forstår bliver ikke truffet. Beskrivelsen står derfor
+ * under hvert navn, og man kan se hvad man vælger til og fra.
+ */
+function Vinkelvalg({ vinkler, valgte, saetValgte, antal }) {
+  if (!vinkler.length) return null;
+
+  function skift(id) {
+    saetValgte(valgte.includes(id) ? valgte.filter((x) => x !== id) : [...valgte, id]);
+  }
+
+  return (
+    <Felt mrk="Vinkler"
+      hjaelp="Grebene i de enkelte opslag. De fordeles hen over serien — vælg ingen, og modellen vælger selv.">
+      <div style={{ display: "grid", gap: 8 }}>
+        {vinkler.map((v) => (
+          <label key={v.id} style={{
+            display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13.5,
+            padding: "7px 9px", borderRadius: 8,
+            border: `1px solid ${valgte.includes(v.id) ? "#94A3B8" : "#E2E8F0"}`,
+            background: valgte.includes(v.id) ? "#F8FAFC" : "#fff", cursor: "pointer",
+          }}>
+            <input type="checkbox" checked={valgte.includes(v.id)}
+              onChange={() => skift(v.id)} style={{ marginTop: 3 }} />
+            <span>
+              <strong style={{ fontWeight: 600 }}>{v.navn}</strong>
+              <span style={{ ...styles.dæmpetLille, display: "block", marginTop: 2 }}>
+                {v.beskrivelse}
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+      {valgte.length > antal && (
+        <p style={{ ...styles.dæmpetLille, marginTop: 6 }}>
+          Du har valgt {valgte.length} vinkler til {antal} opslag. Modellen bruger
+          de {antal} der passer bedst til briefen.
+        </p>
+      )}
+    </Felt>
+  );
+}
+
+/**
+ * Det halvskrevne skal overleve en genindlaesning.
+ *
+ * Briefen bliver foerst til en raekke i databasen naar Claudes svar er
+ * laest ind. Indtil da laa den kun i React-state, og en lukket fane eller
+ * et uheldigt tryk paa F5 tog den med sig. Det er den slags tab man ikke
+ * opdager foer det er sket.
+ *
+ * localStorage og ikke databasen, fordi en kladde uden navn ikke er en
+ * kampagne endnu -- den skal ikke dukke op i listen for kollegaen. Naar
+ * kampagnen er oprettet, ryddes noeglen.
+ *
+ * Per organisation: to organisationer er to adskilte arbejdsborde, og en
+ * halvskrevet brief maa ikke dukke op i den forkerte.
+ */
+function kladdeNoegle(orgId) {
+  return `kampagnekladde:${orgId ?? "ukendt"}`;
+}
+
+function laesKladde(orgId) {
+  try {
+    const raa = window.localStorage.getItem(kladdeNoegle(orgId));
+    return raa ? JSON.parse(raa) : null;
+  } catch {
+    // Privat vindue, fuld disk, ugyldig JSON. En kladde der ikke kan
+    // laeses er ikke vaerd at stoppe siden for.
+    return null;
+  }
+}
+
+function NyKampagne({ brands, kunder, kanalerFor, visToast, efterOprettelse, org, gaaTilKunder }) {
+  const kladde = useMemo(() => laesKladde(org?.id), [org?.id]);
+  // Kun hvis brandet stadig findes. Et slettet brand i en gammel kladde
+  // ville ellers give et valg der peger på ingenting, og en prompt uden
+  // virksomhed bag.
+  const [brandId, setBrandId] = useState(
+    brands.some((b) => b.id === kladde?.brandId) ? kladde.brandId : brands[0]?.id ?? "",
+  );
+  const [navn, setNavn] = useState(kladde?.navn ?? "");
+  const [brief, setBrief] = useState(kladde?.brief ?? "");
+  const [maal, setMaal] = useState(kladde?.maal ?? "");
   const [start, setStart] = useState(datoNoegle(new Date()));
   const [slut, setSlut] = useState("");
   const [antal, setAntal] = useState(5);
@@ -826,6 +1085,98 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
   const [kopieret, setKopieret] = useState(false);
   const [venter, setVenter] = useState(false);
   const [fejl, setFejl] = useState("");
+  const [arketyper, setArketyper] = useState([]);
+  const [arketypeId, setArketypeId] = useState("");
+  const [strategiId, setStrategiId] = useState("");
+  const [vinkelIds, setVinkelIds] = useState([]);
+  // Organisationens standard, men kun som udgangspunkt.
+  const [sprog, setSprog] = useState(org?.sprog ?? "da");
+  const [regler, setRegler] = useState("");
+  const [visRegler, setVisRegler] = useState(false);
+  const { planer, vinkler: alleVinkler } = useStrategier(org?.id);
+
+  useEffect(() => { setSprog(org?.sprog ?? "da"); }, [org?.id, org?.sprog]);
+
+  // Skrives der ikke noget, gemmes der ikke noget: en tom kladde ville
+  // blot betyde at brandvalget blev laast fast paa tvaers af besoeg.
+  useEffect(() => {
+    if (!org?.id) return;
+    try {
+      if (navn.trim() || brief.trim() || maal.trim()) {
+        window.localStorage.setItem(
+          kladdeNoegle(org.id),
+          JSON.stringify({ brandId, navn, brief, maal }),
+        );
+      } else {
+        window.localStorage.removeItem(kladdeNoegle(org.id));
+      }
+    } catch {
+      // Kan der ikke gemmes, skal siden stadig virke.
+    }
+  }, [org?.id, brandId, navn, brief, maal]);
+
+  function rydKladde() {
+    try { window.localStorage.removeItem(kladdeNoegle(org?.id)); } catch { /* ligegyldigt */ }
+  }
+
+  /**
+   * Gem uden at generere noget.
+   *
+   * Kampagnen oprettes uden opslag. Det er ikke en halv kampagne -- det er
+   * en brief der er skrevet faerdig og endnu ikke koert. Den kan aabnes
+   * under Kampagner og koeres gennem «Ny brief» naar der er tid.
+   */
+  async function gemKladde() {
+    setFejl("");
+    if (!navn.trim()) { setFejl("Kampagnen skal have et navn for at kunne gemmes."); return; }
+    if (!brandId) { setFejl("Vælg et brand."); return; }
+
+    setVenter(true);
+    const { data, error } = await supabase.from("campaigns").insert({
+      brand_id: brandId, name: navn.trim(), brief: brief.trim(),
+      goal: maal.trim() || null, starts_on: start, ends_on: slut || null, status: "draft",
+      arketype_id: arketypeId || null,
+      strategi_id: strategiId || null,
+      vinkel_ids: vinkelIds,
+      sprog,
+      retningslinjer:
+        visRegler && regler.trim() && regler.trim() !== gaeldendeRetningslinjer({ org }).trim()
+          ? regler.trim()
+          : null,
+    }).select().single();
+    setVenter(false);
+
+    if (error || !data) {
+      setFejl(manglerMigration(error) ? MIGRATIONSBESKED : error?.message ?? "Kunne ikke gemme kampagnen.");
+      return;
+    }
+
+    rydKladde();
+    visToast("Kampagnen er gemt. Den ligger under Kampagner, klar til at køre.");
+    efterOprettelse(data.id);
+  }
+
+  useEffect(() => {
+    if (!org?.id) return undefined;
+    let afbrudt = false;
+    supabase.from("arketyper").select("*").eq("organisation_id", org.id)
+      .eq("aktiv", true).order("sortering").order("navn")
+      .then(({ data }) => { if (!afbrudt) setArketyper(data ?? []); });
+    return () => { afbrudt = true; };
+  }, [org?.id]);
+
+  const arketype = arketyper.find((a) => a.id === arketypeId) ?? null;
+  const strategi = planer.find((p) => p.id === strategiId) ?? null;
+  const vinkler = alleVinkler.filter((v) => vinkelIds.includes(v.id));
+
+  // Feltet står tomt indtil man folder det ud: en forudfyldt tekstboks på
+  // 40 linjer invitererer til at rette i noget man ikke havde tænkt sig.
+  function foldRegler() {
+    setVisRegler((v) => {
+      if (!v && !regler) setRegler(gaeldendeRetningslinjer({ org }));
+      return !v;
+    });
+  }
 
   const brand = brands.find((b) => b.id === brandId);
   const kundensKanaler = brandId ? kanalerFor(brandId) : [];
@@ -835,7 +1186,7 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
     setValgte((v) => (v.includes(p) ? v.filter((x) => x !== p) : [...v, p]));
   }
 
-  function byg() {
+  async function byg() {
     setFejl("");
     if (!navn.trim() || !brief.trim()) { setFejl("Udfyld navn og brief."); return; }
     if (!valgte.length) { setFejl("Vælg mindst én kanal."); return; }
@@ -843,6 +1194,9 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
     setPrompt(byggPrompt({
       brand, navn: navn.trim(), brief: brief.trim(), maal: maal.trim(),
       antal, kanaler: valgte, start, slut,
+      rettelser: await hentRettelser(brand?.id),
+      arketype, strategi, vinkler, sprog,
+      retningslinjer: visRegler ? regler : gaeldendeRetningslinjer({ org }),
     }));
     setKopieret(false);
   }
@@ -871,6 +1225,9 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
     const res = await kaldApi("claude-lokal", {
       handling: "generer", brand, navn, brief, maal,
       antal, kanaler: valgte, start, slut,
+      arketype, strategi, vinkler, sprog,
+      retningslinjer: visRegler ? regler : gaeldendeRetningslinjer({ org }),
+      rettelser: await hentRettelser(brand?.id),
     });
     setVenter(false);
 
@@ -896,12 +1253,26 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
       .insert({
         brand_id: brandId, name: navn.trim(), brief: brief.trim(),
         goal: maal.trim() || null, starts_on: start, ends_on: slut || null, status: "draft",
+        arketype_id: arketypeId || null,
+        // Valget gemmes, så en senere omskrivning starter samme sted. Uden
+        // det ville planen kun leve i den dialog den blev skrevet i.
+        strategi_id: strategiId || null,
+        vinkel_ids: vinkelIds,
+        sprog,
+        // Kun gemt hvis den afviger fra organisationens. Ellers ville en
+        // kopi fryse standarden fast den dag den bliver rettet.
+        retningslinjer:
+          visRegler && regler.trim() && regler.trim() !== gaeldendeRetningslinjer({ org }).trim()
+            ? regler.trim()
+            : null,
       })
       .select().single();
 
     if (kampagneFejl || !kampagne) {
       setVenter(false);
-      setFejl(kampagneFejl?.message ?? "Kunne ikke oprette kampagnen.");
+      setFejl(manglerMigration(kampagneFejl)
+        ? MIGRATIONSBESKED
+        : kampagneFejl?.message ?? "Kunne ikke oprette kampagnen.");
       return;
     }
 
@@ -912,6 +1283,10 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
         .insert({
           campaign_id: kampagne.id, brand_id: brandId, body: o.tekst,
           hashtags: o.hashtags, image_brief: o.billedbrief,
+          // Originalen sættes én gang og røres aldrig igen. Forskellen til
+          // body er det eneste materiale kommende kampagner kan lære af.
+          body_original: o.tekst, hashtags_original: o.hashtags,
+          krog_alt: o.krogAlt || null,
           scheduled_at: tidspunkt(start, o.dag, o.klokke), status: "needs_approval",
         })
         .select().single();
@@ -927,12 +1302,28 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
     }
 
     setVenter(false);
+    rydKladde();
     visToast(`${oprettede} opslag oprettet som kladder.`);
     efterOprettelse(kampagne.id);
   }
 
   if (!brands.length) {
-    return <p style={styles.dæmpet}>Ingen kunder endnu. Kør <code>npm run db:setup</code>.</p>;
+    const harKunde = (kunder ?? []).length > 0;
+    return (
+      <>
+        <h1 style={styles.h1}>Ny kampagne</h1>
+        <p style={styles.dæmpet}>
+          {harKunde
+            ? "Du har en kunde, men endnu ingen brand. Et brand er den profil kampagnen skrives for — opret et under Kunder, så kan du bygge kampagner her."
+            : "Du har ingen kunder endnu. Opret din første kunde under Kunder, tilføj et brand, og kom tilbage hertil."}
+        </p>
+        {gaaTilKunder && (
+          <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={gaaTilKunder}>
+            Gå til Kunder
+          </button>
+        )}
+      </>
+    );
   }
 
   return (
@@ -959,6 +1350,40 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
               <input style={styles.input} value={navn} onChange={(e) => setNavn(e.target.value)}
                 placeholder="fx Hovedrengøring efterår" />
             </Felt>
+
+            {arketyper.length > 0 && (
+              <Felt mrk="Afsender"
+                hjaelp="Hvem skriver. Den samme viden fortalt af en der har bygget det og en der har ryddet op efter det giver to forskellige opslag.">
+                <select style={styles.input} value={arketypeId}
+                  onChange={(e) => { setArketypeId(e.target.value); setPrompt(""); }}>
+                  <option value="">Ingen — brug kun brandprofilen</option>
+                  {arketyper.map((a) => <option key={a.id} value={a.id}>{a.navn}</option>)}
+                </select>
+                {arketype && (
+                  <p style={{ ...styles.dæmpetLille, marginTop: 6 }}>{arketype.beskrivelse}</p>
+                )}
+              </Felt>
+            )}
+
+            {planer.length > 0 && (
+              <Felt mrk="Strategi"
+                hjaelp="Planen for serien som helhed: hvordan opslagene fordeler sig, hvad der kommer først, hvornår der må bedes om noget.">
+                <select style={styles.input} value={strategiId}
+                  onChange={(e) => { setStrategiId(e.target.value); setPrompt(""); }}>
+                  <option value="">Ingen — modellen fordeler selv</option>
+                  {planer.map((p) => <option key={p.id} value={p.id}>{p.navn}</option>)}
+                </select>
+                {strategi && (
+                  <p style={{ ...styles.dæmpetLille, marginTop: 6 }}>{strategi.beskrivelse}</p>
+                )}
+              </Felt>
+            )}
+
+            <Vinkelvalg vinkler={alleVinkler} valgte={vinkelIds} antal={antal}
+              saetValgte={(v) => { setVinkelIds(v); setPrompt(""); }} />
+
+            <Sprogvalg vaerdi={sprog} saetVaerdi={(v) => { setSprog(v); setPrompt(""); }}
+              hjaelp="Fagligt indhold på LinkedIn når længere på engelsk. Facebook og Instagram har som regel lokale følgere." />
 
             <Felt mrk="Brief">
               <textarea style={{ ...styles.input, minHeight: 110, fontFamily: "inherit" }}
@@ -999,6 +1424,25 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
                 })}
               </div>
             </Felt>
+
+            {/* Retningslinjerne står først i prompten og gælder alt. De er
+                foldet sammen, fordi en forudfyldt boks på fyrre linjer
+                inviterer til at rette i noget man ikke havde tænkt sig. */}
+            <button type="button" style={{ ...styles.secondaryBtn, marginTop: 4 }} onClick={foldRegler}>
+              {visRegler ? "Skjul retningslinjer" : "Ret retningslinjerne for denne kampagne"}
+            </button>
+
+            {visRegler && (
+              <div style={{ marginTop: 10 }}>
+                <textarea
+                  style={{ ...styles.input, minHeight: 260, fontFamily: "ui-monospace, monospace", fontSize: 13 }}
+                  value={regler} onChange={(e) => { setRegler(e.target.value); setPrompt(""); }} />
+                <p style={styles.dæmpetLille}>
+                  Gælder kun denne kampagne. Skal ændringen gælde alt, så gem den
+                  under Afsender i stedet.
+                </p>
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -1008,7 +1452,15 @@ function NyKampagne({ brands, kanalerFor, visToast, efterOprettelse }) {
             <button style={styles.secondaryBtn} onClick={byg}>
               Byg prompt til copy/paste
             </button>
+            <button style={styles.secondaryBtn} disabled={venter} onClick={gemKladde}>
+              Gem uden at køre
+            </button>
           </div>
+          <p style={styles.dæmpetLille}>
+            «Gem uden at køre» lægger briefen under Kampagner uden opslag. Du kan
+            åbne den senere og køre den gennem Claude. Det du skriver her bliver i
+            øvrigt husket i browseren, indtil kampagnen er gemt.
+          </p>
 
           {brand && (
             <dl style={styles.definitioner}>
@@ -1078,13 +1530,281 @@ function Felt({ mrk, hjaelp, bredde, children }) {
    Kampagner og opslag
    ===================================================================== */
 
+/**
+ * Et afsnit der kan foldes sammen.
+ *
+ * En brief er tit skrevet som ét langt blok -- den blev dikteret eller
+ * klippet fra et dokument -- og den fylder hele skaermen uden at nogen
+ * laeser den. Den skal vaere der, men den skal ikke staa i vejen for
+ * opslagene, som er det man kom for.
+ *
+ * Sammenfoldet er standarden, og graensen er i linjer og ikke i tegn:
+ * en afskaering midt i et ord ser ud som en fejl.
+ */
+function Foldbar({ mrk, tekst, linjer = 4 }) {
+  const [aaben, setAaben] = useState(false);
+  if (!tekst?.trim()) return null;
+
+  // Er teksten kort nok til at staa helt, er en knap kun stoej.
+  const kort = tekst.trim().length < 320 && tekst.split("\n").length <= linjer;
+
+  return (
+    <div style={{ ...styles.kort, marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={styles.dt}>{mrk}</div>
+        <div style={{ flex: 1 }} />
+        {!kort && (
+          <button style={styles.linkBtnLille} onClick={() => setAaben((v) => !v)}>
+            {aaben ? <><ChevronUp size={13} /> Fold sammen</> : <><ChevronDown size={13} /> Vis hele</>}
+          </button>
+        )}
+      </div>
+
+      <div style={{ position: "relative", marginTop: 6 }}>
+        <p style={{
+          margin: 0,
+          fontSize: 14.5,
+          lineHeight: 1.65,
+          color: "#334155",
+          // Teksten har linjeskift man har skrevet med vilje. pre-wrap
+          // beholder dem; uden den bliver alt til én mur.
+          whiteSpace: "pre-wrap",
+          // Omkring 70 tegn pr. linje. Længere linjer mister man øjet på
+          // når man skal finde tilbage til begyndelsen af den næste.
+          maxWidth: "68ch",
+          ...(aaben || kort ? {} : {
+            display: "-webkit-box",
+            WebkitLineClamp: linjer,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }),
+        }}>
+          {tekst.trim()}
+        </p>
+        {!aaben && !kort && (
+          <div style={{
+            position: "absolute", left: 0, right: 0, bottom: 0, height: 28,
+            background: "linear-gradient(to bottom, rgba(255,255,255,0), #fff)",
+            pointerEvents: "none",
+          }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Artiklen, sat op som den skal læses.
+ *
+ * Modellen skriver mellemrubrikker som «## Overskrift». Her bliver de til
+ * rigtige overskrifter, og afsnittene får den linjelængde man kan læse en
+ * artikel i. Ingen markdown-pakke: vi har brug for præcis to ting, og et
+ * bibliotek ville tage 40 kB med for dem.
+ */
+function ArtikelVisning({ tekst, cover, maxBredde = "64ch" }) {
+  const linjer = (tekst ?? "").split("\n");
+  if (!linjer.length) return null;
+
+  const dele = [];
+  let afsnit = [];
+
+  const luk = (i) => {
+    if (!afsnit.length) return;
+    dele.push(
+      <p key={`p${i}`} style={{ margin: "0 0 14px", fontSize: 15.5, lineHeight: 1.7, color: "#1E293B" }}>
+        {afsnit.join(" ")}
+      </p>,
+    );
+    afsnit = [];
+  };
+
+  linjer.forEach((raa, i) => {
+    const l = raa.trim();
+    if (!l) { luk(i); return; }
+    if (l.startsWith("## ")) {
+      luk(i);
+      dele.push(
+        <h3 key={`h${i}`} style={{ margin: "26px 0 10px", fontSize: 17, fontWeight: 650, color: "#0F172A" }}>
+          {l.slice(3)}
+        </h3>,
+      );
+      return;
+    }
+    afsnit.push(l);
+  });
+  luk("slut");
+
+  // Første del er titlen. Den står som h2, fordi det er sådan den bliver
+  // vist på LinkedIn — og fordi man ellers ikke kan se hvor artiklen
+  // begynder i et tekstfelt fuldt af afsnit.
+  const [foerste, ...resten] = dele;
+
+  return (
+    <div style={{ maxWidth: maxBredde }}>
+      {/* Coveret staar foer titlen, som paa LinkedIn. Forholdet er laast,
+          saa et billede i et andet format beskaeres i visningen frem for
+          at skubbe teksten ned. */}
+      {cover && (
+        <img src={cover} alt=""
+          style={{ width: "100%", aspectRatio: "1200 / 627", objectFit: "cover",
+            borderRadius: 10, marginBottom: 18, display: "block", border: "1px solid #E2E8F0" }} />
+      )}
+      {foerste && (
+        <h2 style={{ margin: "0 0 16px", fontSize: 24, lineHeight: 1.25, fontWeight: 700, color: "#0F172A" }}>
+          {foerste.props.children}
+        </h2>
+      )}
+      {resten}
+    </div>
+  );
+}
+
+/**
+ * Hjælp til den side man står på.
+ *
+ * En knap der altid er der, og som svarer på den side man kigger på —
+ * ikke en manual man skal lede i. Folk søger ikke hjælp; de sidder fast
+ * og kigger sig omkring, og knappen skal være der hvor de kigger.
+ *
+ * Nederst til højre, over indholdet, med afstand til systemlinjen på en
+ * telefon. Escape lukker, og et klik uden for gør det samme.
+ */
+function Hjaelp({ side }) {
+  const [aaben, setAaben] = useState(false);
+  const mobil = useMobil();
+  const h = HJAELP[side] ?? HJAELP_STANDARD;
+
+  useEffect(() => {
+    if (!aaben) return undefined;
+    const tast = (e) => { if (e.key === "Escape") setAaben(false); };
+    window.addEventListener("keydown", tast);
+    return () => window.removeEventListener("keydown", tast);
+  }, [aaben]);
+
+  // Skifter man side med panelet åbent, ville man læse om en anden side
+  // end den man ser. Luk i stedet — det er mindre forvirrende end at
+  // skifte indholdet under fingeren.
+  useEffect(() => { setAaben(false); }, [side]);
+
+  return (
+    <>
+      <button
+        onClick={() => setAaben((v) => !v)}
+        aria-label={aaben ? "Luk hjælpen" : `Hjælp til ${h.titel}`}
+        aria-expanded={aaben}
+        style={{
+          position: "fixed",
+          right: 20,
+          bottom: `calc(20px + env(safe-area-inset-bottom, 0px))`,
+          width: 52, height: 52, borderRadius: "50%",
+          border: "none",
+          background: aaben ? "#334155" : "#2F5DE0",
+          color: "#fff",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          boxShadow: "0 4px 14px rgba(15,23,42,.28)",
+          cursor: "pointer",
+          zIndex: 60,
+        }}>
+        {aaben ? <X size={22} /> : <HelpCircle size={24} />}
+      </button>
+
+      {aaben && (
+        <>
+          <div
+            onClick={() => setAaben(false)}
+            style={{ position: "fixed", inset: 0, zIndex: 55, background: "transparent" }} />
+
+          <div
+            role="dialog"
+            aria-label={`Hjælp til ${h.titel}`}
+            style={{
+              position: "fixed",
+              zIndex: 56,
+              right: mobil ? 12 : 20,
+              left: mobil ? 12 : "auto",
+              bottom: `calc(84px + env(safe-area-inset-bottom, 0px))`,
+              width: mobil ? "auto" : 400,
+              maxHeight: "min(70vh, 560px)",
+              overflowY: "auto",
+              background: "#fff",
+              borderRadius: 14,
+              border: "1px solid #E2E8F0",
+              boxShadow: "0 12px 40px -12px rgba(15,23,42,.35)",
+              padding: "18px 20px 20px",
+            }}>
+            <h2 style={{ ...styles.h2, margin: "0 0 8px" }}>{h.titel}</h2>
+            <p style={{ margin: "0 0 14px", fontSize: 14, lineHeight: 1.6, color: "#334155" }}>
+              {h.intro}
+            </p>
+
+            {h.punkter.length > 0 && (
+              <dl style={{ margin: 0, display: "grid", gap: 10 }}>
+                {h.punkter.map(([mrk, tekst]) => (
+                  <div key={mrk}>
+                    <dt style={{ fontSize: 13.5, fontWeight: 600, color: "#0F172A" }}>{mrk}</dt>
+                    <dd style={{ margin: "2px 0 0", fontSize: 13.5, lineHeight: 1.55, color: "#475569" }}>
+                      {tekst}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+
+            {h.bemaerk && (
+              <p style={{
+                margin: "16px 0 0", padding: "10px 12px",
+                background: "#F1F5F9", borderRadius: 9,
+                fontSize: 13, lineHeight: 1.55, color: "#475569",
+              }}>
+                {h.bemaerk}
+              </p>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function Kampagner({
+  org,
   kampagner, opslag, brands, kunder, brandFor, kanalerFor,
-  valgt, setValgt, visToast, genindlaes,
+  valgt, setValgt, fokus, visToast, genindlaes,
 }) {
   const [visIndex, setVisIndex] = useState(null);
   const [retter, setRetter] = useState(false);
+  const [filter, setFilter] = useState("alle");
+  const [udvalgte, setUdvalgte] = useState(() => new Set());
+  const [masseVenter, setMasseVenter] = useState(false);
+  const [fremhaevet, setFremhaevet] = useState(null);
   const aktuel = kampagner.find((k) => k.id === valgt) ?? kampagner[0];
+
+  // Over det tidlige return, og det er ikke en smagssag: en hook efter et
+  // return køres ikke i alle gennemløb, og React fejler hårdt med «rendered
+  // fewer hooks than expected» i det øjeblik listen skifter mellem tom og
+  // ikke-tom. Det ville have virket hele vejen gennem min test og først
+  // knækket hos en bruger der slettede sin sidste kampagne.
+  useEffect(() => { setUdvalgte(new Set()); }, [aktuel?.id, filter]);
+
+  // Kom vi hertil fra et klik i kalenderen, skal filteret åbnes først — ellers
+  // ruller vi efter et kort der ikke er tegnet, fordi opslaget ligger uden for
+  // det filter der stod fra sidst.
+  useEffect(() => {
+    if (!fokus) return;
+    setFilter("alle");
+    setFremhaevet(fokus.id);
+  }, [fokus]);
+
+  // Rullingen sker først når kortet er tegnet, derfor sin egen effekt.
+  // block: "center" frem for "start": ellers lægger den faste topbjælke sig
+  // oven på kortets øverste linje.
+  useEffect(() => {
+    if (!fremhaevet) return;
+    const kort = document.getElementById(`opslag-${fremhaevet}`);
+    if (kort) kort.scrollIntoView({ behavior: "smooth", block: "center" });
+    const ur = setTimeout(() => setFremhaevet(null), 2600);
+    return () => clearTimeout(ur);
+  }, [fremhaevet]);
 
   if (!kampagner.length) {
     return <p style={styles.dæmpet}>Ingen kampagner endnu.</p>;
@@ -1093,6 +1813,73 @@ function Kampagner({
   const liste = opslag.filter((o) => o.campaign_id === aktuel?.id);
   const brand = aktuel ? brandFor(aktuel.brand_id) : null;
   const afventer = liste.filter((o) => o.status === "needs_approval").length;
+
+  const test = FILTRE.find(([id]) => id === filter)?.[2] ?? (() => true);
+  const vist = liste.filter(test);
+
+  // Udvalget ryddes når kampagnen eller filteret skifter (effekten ligger
+  // over det tidlige return). Et opslag man ikke længere kan se, må ikke
+  // kunne godkendes ved et uheld.
+  const valgbare = vist.filter(kanGodkendes);
+  const valgteIder = [...udvalgte].filter((id) => valgbare.some((o) => o.id === id));
+
+  function skiftValg(id) {
+    setUdvalgte((v) => {
+      const ny = new Set(v);
+      if (ny.has(id)) ny.delete(id); else ny.add(id);
+      return ny;
+    });
+  }
+
+  function vaelgAlle() {
+    setUdvalgte(valgteIder.length === valgbare.length
+      ? new Set()
+      : new Set(valgbare.map((o) => o.id)));
+  }
+
+  /**
+   * Godkend eller træk godkendelsen på alt det markerede.
+   *
+   * Ét kald med .in() frem for én opdatering per opslag: femten kald ville
+   * kunne lykkes halvvejs og efterlade listen i en tilstand ingen bad om.
+   *
+   * De opslag der mangler et billede til Instagram, sorteres fra FØR kaldet
+   * og tælles op bagefter. Databasen ville tage imod dem -- det er
+   * publiceringen der ville fejle, og det er for sent at opdage det der.
+   */
+  async function masseStatus(status) {
+    const ider = status === "approved"
+      ? valgteIder.filter((id) => !manglerBillede(liste.find((o) => o.id === id)))
+      : valgteIder;
+    const sprunget = valgteIder.length - ider.length;
+
+    if (!ider.length) {
+      visToast(sprunget
+        ? `Ingen godkendt. ${sprunget} mangler billede til Instagram.`
+        : "Ingen opslag markeret.", false);
+      return;
+    }
+
+    setMasseVenter(true);
+    const { data, error } = await supabase.from("posts")
+      .update({ status }).in("id", ider).select("id");
+    setMasseVenter(false);
+
+    if (error) return visToast(error.message, false);
+
+    const antal = data?.length ?? 0;
+    if (!antal) {
+      return visToast("Intet blev ændret. Har du rettigheder til at godkende her?", false);
+    }
+
+    visToast(
+      status === "approved"
+        ? `${antal} godkendt.${sprunget ? ` ${sprunget} sprunget over — mangler billede til Instagram.` : ""}`
+        : `Godkendelsen trukket på ${antal} opslag.`,
+    );
+    setUdvalgte(new Set());
+    await genindlaes();
+  }
 
   return (
     <>
@@ -1129,31 +1916,134 @@ function Kampagner({
             {afventer > 0 && ` · ${afventer} afventer godkendelse`}
           </p>
 
-          {aktuel.brief && (
-            <div style={{ ...styles.kort, marginTop: 14 }}>
-              <div style={styles.dt}>Brief</div>
-              <p style={{ margin: "4px 0 0", fontSize: 14, color: "#334155" }}>{aktuel.brief}</p>
+          <Foldbar mrk="Brief" tekst={aktuel.brief} />
+
+          {liste.length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 18 }}>
+              {FILTRE.map(([id, mrk, t]) => {
+                const antal = liste.filter(t).length;
+                // Fejlede og publicerede vises kun når der faktisk er nogen.
+                // En knap der altid siger 0 er støj.
+                if (!antal && id !== "alle" && id !== "afventer") return null;
+                return (
+                  <button key={id} onClick={() => setFilter(id)}
+                    style={filter === id ? styles.faneAktiv : styles.fane}>
+                    {mrk} {id !== "alle" && <span style={{ opacity: 0.7 }}>{antal}</span>}
+                  </button>
+                );
+              })}
+
+              {/* Artiklen er ikke et filter over opslagene — den er en helt
+                  anden ting. Den står alligevel her, fordi det er her man
+                  leder efter den: ved siden af det serien blev til. */}
+              {aktuel?.artikel && (
+                <button onClick={() => setFilter("artikel")}
+                  style={filter === "artikel" ? styles.faneAktiv : styles.fane}>
+                  <FileText size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+                  Artikel
+                </button>
+              )}
+            </div>
+          )}
+
+          {valgbare.length > 0 && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+              marginTop: 12, padding: "10px 12px", borderRadius: 10,
+              background: valgteIder.length ? "#EEF2FF" : "#F8FAFC",
+              border: `1px solid ${valgteIder.length ? "#C7D2FE" : "#E2E8F0"}`,
+            }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13.5, cursor: "pointer" }}>
+                <input type="checkbox" onChange={vaelgAlle}
+                  checked={valgteIder.length > 0 && valgteIder.length === valgbare.length}
+                  ref={(el) => {
+                    // Delvist valg vises som en streg og ikke et flueben.
+                    if (el) el.indeterminate = valgteIder.length > 0 && valgteIder.length < valgbare.length;
+                  }} />
+                Markér alle {valgbare.length} der kan godkendes
+              </label>
+
+              <div style={{ flex: 1 }} />
+
+              {valgteIder.length > 0 && (
+                <>
+                  <span style={styles.dæmpetLille}>{valgteIder.length} markeret</span>
+                  <button style={styles.primaryBtn} disabled={masseVenter}
+                    onClick={() => masseStatus("approved")}>
+                    {masseVenter ? <><Loader2 size={15} /> Godkender…</> : `Godkend ${valgteIder.length}`}
+                  </button>
+                  <button style={styles.linkBtnLille} onClick={() => setUdvalgte(new Set())}>
+                    Ryd
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Godkendte opslag kan trækkes tilbage samlet. Står for sig,
+              fordi det er den modsatte handling og ikke skal kunne rammes
+              ved et uheld når man sidder og godkender. */}
+          {filter === "godkendt" && vist.some((o) => o.status === "approved") && (
+            <p style={{ ...styles.dæmpetLille, marginTop: 8 }}>
+              Skal en godkendelse trækkes tilbage, gøres det på det enkelte opslag.
+            </p>
+          )}
+
+          {filter === "artikel" && aktuel?.artikel && (
+            <div style={{ ...styles.kort, marginTop: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <div style={styles.dt}>
+                  Artikel
+                  {aktuel.artikel_opdateret && ` · skrevet ${visTid(aktuel.artikel_opdateret)}`}
+                </div>
+                <div style={{ flex: 1 }} />
+                <button style={styles.secondaryBtn}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(aktuel.artikel);
+                      visToast("Artiklen er kopieret. Indsæt den i Linkedins «Write article».");
+                    } catch {
+                      visToast("Kunne ikke kopiere. Markér teksten og tryk Cmd+C.", false);
+                    }
+                  }}>
+                  Kopiér artiklen
+                </button>
+                <button style={styles.secondaryBtn} onClick={() => setRetter(true)}>
+                  <Pencil size={14} /> Redigér
+                </button>
+              </div>
+              <ArtikelVisning tekst={aktuel.artikel} cover={aktuel.artikel_billede} />
             </div>
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 16 }}>
-            {liste.map((o, i) => (
+            {filter !== "artikel" && vist.map((o) => (
               <OpslagKort key={o.id} opslag={o} brand={brand} visToast={visToast}
-                genindlaes={genindlaes} onForhaandsvis={() => setVisIndex(i)} />
+                genindlaes={genindlaes}
+                fremhaevet={fremhaevet === o.id}
+                onForhaandsvis={() => setVisIndex(liste.findIndex((x) => x.id === o.id))}
+                markerbar={kanGodkendes(o)}
+                markeret={udvalgte.has(o.id)}
+                onMarkér={() => skiftValg(o.id)} />
             ))}
           </div>
 
           {!liste.length && <p style={styles.dæmpet}>Kampagnen har ingen opslag.</p>}
+          {liste.length > 0 && filter !== "artikel" && !vist.length && (
+            <p style={styles.dæmpet}>Ingen opslag i dette filter.</p>
+          )}
         </>
       )}
 
       {visIndex !== null && (
         <Forhaandsvisning liste={liste} startIndex={visIndex} brandFor={brandFor}
+          artikel={aktuel?.artikel} artikelCover={aktuel?.artikel_billede}
           onLuk={() => setVisIndex(null)} />
       )}
 
       {retter && aktuel && (
         <RetKampagne
+          org={org}
           kampagne={aktuel} liste={liste} brand={brand}
           kanaler={kanalerFor(aktuel.brand_id)}
           brands={brands} kunder={kunder} kanalerFor={kanalerFor}
@@ -1164,7 +2054,10 @@ function Kampagner({
   );
 }
 
-function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
+function OpslagKort({
+  opslag, brand, visToast, genindlaes, onForhaandsvis,
+  markerbar = false, markeret = false, onMarkér, fremhaevet = false,
+}) {
   const [aaben, setAaben] = useState(false);
   const [venter, setVenter] = useState("");
   const [tekst, setTekst] = useState(opslag.body);
@@ -1175,6 +2068,19 @@ function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
 
   const st = STATUS[opslag.status] ?? STATUS.draft;
   const blokeret = manglerBillede(opslag);
+
+  // Et godkendt opslag hvis tid er passeret med mere end kvarteret plus lidt
+  // slæk. Robotten kører hvert 15. minut, så 20 er «den har haft sin chance»
+  // uden at råbe op ved almindelig forsinkelse.
+  const forsinket =
+    opslag.status === "approved" &&
+    opslag.scheduled_at &&
+    Date.now() - new Date(opslag.scheduled_at).getTime() > 20 * 60 * 1000;
+
+  // Ingen kanalrækker. Opslaget bliver aldrig sendt nogen steder hen, uanset
+  // hvor mange gange robotten kigger forbi — og indtil nu stod der ikke et
+  // ord om det nogen steder i appen.
+  const udenKanaler = !(opslag.maal ?? []).length;
 
   async function saetBillede(url) {
     const { error } = await supabase.from("posts").update({ image_url: url }).eq("id", opslag.id);
@@ -1237,15 +2143,39 @@ function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
   const farve = brand?.colors?.primary ?? "#64748B";
 
   return (
-    <article style={{ ...styles.kort, borderLeft: `3px solid ${farve}` }}>
+    <article id={`opslag-${opslag.id}`}
+      style={{
+        ...styles.kort,
+        borderLeft: `3px solid ${farve}`,
+        ...(fremhaevet
+          ? { boxShadow: "0 0 0 3px #2F5DE0", transition: "box-shadow 400ms ease" }
+          : { transition: "box-shadow 600ms ease" }),
+      }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        {markerbar && onMarkér && (
+          <input type="checkbox" checked={markeret} onChange={onMarkér}
+            title="Markér til samlet godkendelse" style={{ cursor: "pointer" }} />
+        )}
         <span style={{ ...styles.mærkat, background: st.bg, color: st.fg }}>{st.navn}</span>
-        <span style={styles.dæmpetLille}>{visTid(opslag.scheduled_at)}</span>
+        {/* «Planlagt» står der med vilje. Et tidspunkt uden ord kunne lige
+            så godt være da opslaget blev skrevet — og for et publiceret
+            opslag er det netop IKKE det samme som da det gik ud. */}
+        <span style={styles.dæmpetLille}>
+          {opslag.scheduled_at ? `Planlagt ${visTid(opslag.scheduled_at)}` : "Ikke planlagt"}
+        </span>
         {(opslag.maal ?? []).map((m) => (
-          <span key={m.id} style={{ ...styles.mærkat, background: "#F1F5F9", color: "#475569" }}
-            title={m.fejl ?? undefined}>
+          <span key={m.id}
+            style={{
+              ...styles.mærkat,
+              background: m.status === "published" ? "#D1FAE5"
+                : m.status === "failed" ? "#FEE2E2" : "#F1F5F9",
+              color: m.status === "published" ? "#065F46"
+                : m.status === "failed" ? "#991B1B" : "#475569",
+            }}
+            title={m.fejl ?? (m.publiceret ? `Sendt ${visTid(m.publiceret)}` : undefined)}>
             {PLATFORM_KORT[m.platform]}
             {m.status === "published" ? " ✓" : m.status === "failed" ? " ⚠" : ""}
+            {m.publiceret && ` ${visKortTid(m.publiceret)}`}
           </span>
         ))}
         {blokeret && (
@@ -1268,6 +2198,23 @@ function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <textarea style={{ ...styles.input, minHeight: 150 }} className="opslagstekst"
             value={tekst} onChange={(e) => setTekst(e.target.value)} />
+
+          {/* Den anden krog.
+              Modellen skriver to åbninger til hvert opslag, og valget mellem
+              dem er billigere end en omskrivning — og et bedre signal end en
+              godkendelse, fordi et valg siger hvad du foretrak, ikke bare at
+              du kunne leve med det. */}
+          {opslag.krog_alt && (
+            <div style={{ background: "#F1F5F9", borderRadius: 8, padding: "10px 12px" }}>
+              <div style={styles.dt}>Anden krog</div>
+              <p style={{ margin: "4px 0 8px", fontSize: 14 }}>{opslag.krog_alt}</p>
+              <button style={styles.secondaryBtn} type="button"
+                onClick={() => setTekst(byttKrog(tekst, opslag.krog_alt))}>
+                Byt til denne
+              </button>
+            </div>
+          )}
+
           <input style={styles.input} value={tags} onChange={(e) => setTags(e.target.value)}
             placeholder="hashtags adskilt af mellemrum" />
           <input style={styles.input} value={billedUrl} onChange={(e) => setBilledUrl(e.target.value)}
@@ -1335,6 +2282,38 @@ function OpslagKort({ opslag, brand, visToast, genindlaes, onForhaandsvis }) {
         </button>
       </div>
 
+      {/* Hvad der faktisk sker med et godkendt opslag.
+          Robotten kigger forbi hvert kvarter, så et opslag planlagt til
+          08:00 går ud mellem 08:00 og 08:15. Uden den oplysning ser et
+          opslag der «burde være ude» ud som en fejl i seks minutter. */}
+      {udenKanaler && opslag.status !== "published" && (
+        <p style={{ ...styles.fejlBoks, marginTop: 10 }}>
+          Opslaget har ingen kanaler. Det bliver ikke sendt nogen steder hen —
+          heller ikke selvom det er godkendt. Sæt kanaler på under
+          «Ret kampagnen → Kanaler».
+        </p>
+      )}
+
+      {!udenKanaler && opslag.status === "approved" && opslag.scheduled_at && (
+        forsinket ? (
+          /* Løftet ovenfor blev ikke holdt, og så skal der ikke stå noget
+             beroligende. Tre ting kan være galt, og de har hver sit sted at
+             kigge — derfor står de her frem for en vag «noget gik galt». */
+          <p style={{ ...styles.fejlBoks, marginTop: 10 }}>
+            Skulle være sendt {visTid(opslag.scheduled_at)}, men ligger her endnu.
+            Tjek i denne rækkefølge: står <code>PUBLISH_DRY_RUN</code> til
+            «false» i Netlify (ellers sender appen aldrig noget), kører den
+            planlagte funktion (Netlify → Functions → planlagt-publicering),
+            og er kanalen forbundet med et gyldigt token?
+          </p>
+        ) : (
+          <p style={{ ...styles.dæmpetLille, marginTop: 10 }}>
+            Sendes automatisk {visTid(opslag.scheduled_at)} — robotten kigger forbi hvert
+            kvarter, så det sker inden for et kvarter efter tidspunktet.
+          </p>
+        )
+      )}
+
       {(opslag.maal ?? []).filter((m) => m.fejl).map((m) => (
         <p key={m.id} style={{ ...styles.fejlBoks, marginTop: 10 }}>
           {m.kanalNavn || PLATFORM[m.platform]}: {m.fejl}
@@ -1372,12 +2351,37 @@ function inddelOpslag(liste) {
 }
 
 function RetKampagne({
+  org,
   kampagne, liste, brand, kanaler, brands = [], kunder = [], kanalerFor = () => [],
   visToast, genindlaes, onLuk,
 }) {
   const mobil = useMobil();
   const [tilstand, setTilstand] = useState("felter");
   const [medGodkendte, setMedGodkendte] = useState(false);
+  const [arketyper, setArketyper] = useState([]);
+  // Kampagnen husker sin afsender. Den skal stå valgt, ikke nulstilles —
+  // en omskrivning skal lyde som den samme person som resten af serien.
+  const [arketypeId, setArketypeId] = useState(kampagne.arketype_id ?? "");
+  const [strategiId, setStrategiId] = useState(kampagne.strategi_id ?? "");
+  const [vinkelIds, setVinkelIds] = useState(kampagne.vinkel_ids ?? []);
+  const [sprog, setSprog] = useState(kampagne.sprog ?? "da");
+  const { planer, vinkler: alleVinkler } = useStrategier(org?.id);
+
+  useEffect(() => {
+    if (!org?.id) return undefined;
+    let afbrudt = false;
+    supabase.from("arketyper").select("*").eq("organisation_id", org.id)
+      .eq("aktiv", true).order("sortering").order("navn")
+      .then(({ data }) => { if (!afbrudt) setArketyper(data ?? []); });
+    return () => { afbrudt = true; };
+  }, [org?.id]);
+
+  const arketype = arketyper.find((a) => a.id === arketypeId) ?? null;
+  const strategi = planer.find((p) => p.id === strategiId) ?? null;
+  const vinkler = alleVinkler.filter((v) => vinkelIds.includes(v.id));
+  // Kampagnens egne retningslinjer, ellers organisationens, ellers de
+  // indbyggede. Samme regel som da serien blev skabt.
+  const regler = gaeldendeRetningslinjer({ kampagne, org });
   const [venter, setVenter] = useState(false);
   const [fejl, setFejl] = useState("");
 
@@ -1407,16 +2411,177 @@ function RetKampagne({
     return tal;
   }, [liste]);
 
-  const [valgteKanaler, setValgteKanaler] = useState(() =>
-    kanaler.filter((k) => k.active && liste.some((o) =>
-      (o.maal ?? []).some((m) => m.kanalId === k.id))).map((k) => k.id),
-  );
+  const [valgteKanaler, setValgteKanaler] = useState(() => {
+    const ibrug = kanaler.filter((k) => k.active && liste.some((o) =>
+      (o.maal ?? []).some((m) => m.kanalId === k.id)));
+    // Har kampagnen ingen opslag endnu, er der ingen kanaler «i brug» —
+    // og et tomt felt ville betyde at den nye serie ingen steder skulle hen.
+    return (ibrug.length ? ibrug : kanaler.filter((k) => k.active)).map((k) => k.id);
+  });
 
   const skiftKanal = (id) =>
     setValgteKanaler((v) => (v.includes(id) ? v.filter((x) => x !== id) : [...v, id]));
 
   // Flyt til et andet brand
   const [nytBrandId, setNytBrandId] = useState(kampagne.brand_id);
+  const [sletBekraeft, setSletBekraeft] = useState("");
+  const [artikel, setArtikel] = useState(kampagne.artikel ?? "");
+  const [artikelInstruks, setArtikelInstruks] = useState("");
+  const [artikelKopieret, setArtikelKopieret] = useState(false);
+  const [coverBrief, setCoverBrief] = useState(kampagne.artikel_billedbrief ?? "");
+  const [cover, setCover] = useState(kampagne.artikel_billede ?? "");
+  const [vaelgerCover, setVaelgerCover] = useState(false);
+  const [coverPrompt, setCoverPrompt] = useState("");
+  const [coverSvar, setCoverSvar] = useState("");
+  const [coverFejl, setCoverFejl] = useState("");
+
+  /**
+   * Artiklen bygges på HELE serien, ikke på udsnittet i «det her rører».
+   *
+   * Omfangsvælgeren findes fordi man sjældent vil omskrive alt. Men en
+   * artikel der kun samler halvdelen af argumentet er ikke et halvt
+   * argument — den er et forkert et.
+   */
+  function byggArtikel() {
+    setFejl("");
+    if (!liste.length) return setFejl("Kampagnen har ingen opslag at samle.");
+
+    setPrompt(byggArtikelPrompt({
+      brand, kampagne,
+      opslag: liste.map((o) => ({ ...o, tekst: o.body })),
+      arketype, sprog, retningslinjer: regler,
+      instruks: artikelInstruks,
+    }));
+    setKopieret(false);
+  }
+
+  async function gemArtikel(raa) {
+    setFejl("");
+    let ud;
+    try {
+      ud = laesArtikel(raa ?? svar);
+    } catch (e) {
+      return setFejl(e.message);
+    }
+
+    setVenter(true);
+    const felter = {
+      artikel: ud.samlet,
+      artikel_opdateret: new Date().toISOString(),
+    };
+    // Kun hvis modellen faktisk foreslog en. En tom brief må ikke slette
+    // den man selv har skrevet, fordi et svar tilfældigvis manglede feltet.
+    if (ud.billedbrief) felter.artikel_billedbrief = ud.billedbrief;
+
+    const { data, error } = await supabase.from("campaigns")
+      .update(felter).eq("id", kampagne.id).select("id");
+    setVenter(false);
+
+    if (manglerMigration(error)) return setFejl(MIGRATIONSBESKED);
+    if (error) return setFejl(error.message);
+    if (!data?.length) return setFejl("Intet blev gemt. Har du rettigheder til denne kampagne?");
+
+    setArtikel(ud.samlet);
+    if (ud.billedbrief) setCoverBrief(ud.billedbrief);
+    setSvar("");
+    visToast("Artiklen er gemt på kampagnen.");
+    await genindlaes();
+  }
+
+  /** Coverbilledet er valgt eller genereret — gem URL'en på kampagnen. */
+  async function gemCover(url) {
+    const { error } = await supabase.from("campaigns")
+      .update({ artikel_billede: url }).eq("id", kampagne.id);
+    if (manglerMigration(error)) return setFejl(MIGRATIONSBESKED);
+    if (error) return setFejl(error.message);
+    setCover(url);
+    await genindlaes();
+  }
+
+  /**
+   * Foreslå en brief til den artikel der allerede ligger.
+   *
+   * Artikelprompten foreslår også en, men kun når artiklen skrives. Har man
+   * rettet artiklen i hånden — eller er den fra før feltet fandtes — ville
+   * den eneste vej være at generere hele artiklen om og kaste rettelserne
+   * væk. Det er en høj pris for et billede.
+   */
+  async function foreslaaCover() {
+    setFejl("");
+    setCoverFejl("");
+    if (!artikel.trim()) return setCoverFejl("Der er ingen artikel at foreslå et billede til.");
+
+    setVenter(true);
+    const res = await kaldApi("claude-lokal", { handling: "cover", brand, artikel, arketype });
+    setVenter(false);
+
+    if (!res.ok) {
+      // Virker den lokale vej ikke, bygges prompten så copy/paste er åben.
+      setCoverFejl(res.fejl);
+      setCoverPrompt(byggCoverPrompt({ brand, artikel, arketype }));
+      return;
+    }
+    anvendCoverForslag(res.resultat);
+  }
+
+  function anvendCoverForslag(raa) {
+    setFejl("");
+    setCoverFejl("");
+    try {
+      setCoverBrief(laesCoverBrief(raa ?? coverSvar));
+      setCoverPrompt("");
+      setCoverSvar("");
+      visToast("Forslag indsat. Ret det frit, og gem det når det passer.");
+    } catch (e) {
+      // Egen fejl, vist ved knappen. Dialogens fælles fejlfelt står i
+      // toppen, og coveret ligger nederst i en lang side — en besked man
+      // skal scrolle op for at finde, ligner at der ikke skete noget.
+      setCoverFejl(e.message);
+    }
+  }
+
+  async function gemCoverBrief() {
+    const { error } = await supabase.from("campaigns")
+      .update({ artikel_billedbrief: coverBrief.trim() || null }).eq("id", kampagne.id);
+    if (manglerMigration(error)) return setFejl(MIGRATIONSBESKED);
+    if (error) return setFejl(error.message);
+    visToast("Billedbriefen er gemt.");
+    await genindlaes();
+  }
+
+  /**
+   * Sletter kampagnen og alle dens opslag.
+   *
+   * Opslagene forsvinder med via cascade, og det er præcis derfor der er en
+   * ekstra spærre når nogen af dem er publiceret: de rækker er ikke et
+   * udkast, de er kvitteringen for hvad der faktisk gik ud, med permalinks
+   * og tidspunkter. Sletter man dem, kan appen ikke længere fortælle
+   * sandheden om hvad der er sendt -- og det kan ikke fortrydes.
+   *
+   * Spærren er at skrive navnet. Ikke for at genere, men fordi et «er du
+   * sikker?» besvares med et reflekstryk, og det her skal være en
+   * beslutning.
+   */
+  async function slet() {
+    setFejl("");
+    if (publicerede.length && sletBekraeft.trim() !== kampagne.name) {
+      return setFejl("Skriv kampagnens navn præcist for at bekræfte.");
+    }
+
+    setVenter(true);
+    const { data, error } = await supabase.from("campaigns")
+      .delete().eq("id", kampagne.id).select("id");
+    setVenter(false);
+
+    if (error) return setFejl(error.message);
+    if (!data?.length) {
+      return setFejl("Intet blev slettet. Har du rettigheder til at rette denne kampagne?");
+    }
+
+    visToast(`«${kampagne.name}» er slettet.`);
+    onLuk();
+    await genindlaes();
+  }
 
   // Platformene kampagnen bruger i dag. Det er dem der skal genfindes hos
   // modtageren — kanal-id'erne kan ikke følge med, de hører til det gamle brand.
@@ -1442,11 +2607,26 @@ function RetKampagne({
   const [svar, setSvar] = useState("");
   const [kopieret, setKopieret] = useState(false);
   const [nyBrief, setNyBrief] = useState(kampagne.brief ?? "");
-  const [antal, setAntal] = useState(Math.max(liste.length, 1));
+  // En gemt brief uden opslag skal foreslaa en serie. Math.max(0, 1) gav 1,
+  // og så stod der «1 opslag» hver gang man aabnede en kladde.
+  const [antal, setAntal] = useState(liste.length || 5);
 
   const platforme = [...new Set(kanaler.filter((k) => k.active).map((k) => k.platform))];
 
+  /**
+   * Kopierer en tekst til udklipsholderen.
+   *
+   * Typetjekket er der af en grund. Skrives `onClick={kopier}` i stedet for
+   * `onClick={() => kopier(prompt)}`, sender React klik-hændelsen ind — og
+   * writeText laver den om til strengen «[object Object]» uden at brokke
+   * sig. Man opdager det først når man har indsat det i Claude.
+   */
   async function kopier(tekst) {
+    if (typeof tekst !== "string" || !tekst) {
+      console.error("kopier() fik ikke en tekst:", tekst);
+      setFejl("Der var intet at kopiere. Byg prompten først.");
+      return;
+    }
     try {
       await navigator.clipboard.writeText(tekst);
       setKopieret(true);
@@ -1626,6 +2806,7 @@ function RetKampagne({
     setPrompt(byggOmskrivPrompt({
       brand, kampagne, instruks: instruks.trim(),
       opslag: beroerte.map((o) => ({ ...o, tekst: o.body })),
+      arketype, sprog, retningslinjer: regler,
     }));
     setKopieret(false);
   }
@@ -1634,20 +2815,37 @@ function RetKampagne({
   async function koerLokalt(handling) {
     setFejl("");
 
-    const krop = handling === "omskriv"
+    // Artiklen tager HELE serien, ikke udsnittet. Et argument samlet af
+    // halvdelen af opslagene er ikke et halvt argument, det er et forkert.
+    const krop = handling === "artikel"
+      ? {
+          handling, brand, kampagne,
+          opslag: liste.map((o) => ({ ...o, tekst: o.body })),
+          arketype, sprog, retningslinjer: regler,
+          instruks: artikelInstruks,
+        }
+      : handling === "omskriv"
       ? {
           handling, brand, kampagne, instruks: instruks.trim(),
           opslag: beroerte.map((o) => ({ ...o, tekst: o.body })),
+          arketype, sprog, retningslinjer: regler,
         }
       : {
           handling: "generer", brand, navn: navn.trim(), brief: nyBrief.trim(),
           maal: maal.trim(), antal, kanaler: platforme,
           start: start || kampagne.starts_on, slut,
+          arketype, strategi, vinkler, sprog, retningslinjer: regler,
+          rettelser: await hentRettelser(kampagne.brand_id),
         };
 
+    if (handling === "artikel" && !liste.length) {
+      return setFejl("Kampagnen har ingen opslag at samle.");
+    }
     if (handling === "omskriv" && !instruks.trim()) return setFejl("Skriv hvad der skal rettes.");
-    if (handling !== "omskriv" && !nyBrief.trim()) return setFejl("Skriv den nye brief.");
-    if (!beroerte.length) return setFejl("Ingen opslag at rette.");
+    if (handling === "ny" && !nyBrief.trim()) return setFejl("Skriv den nye brief.");
+    // En omskrivning uden opslag er meningsloes. En ny brief er det ikke:
+    // det er sådan en gemt kampagne uden opslag bliver til en serie.
+    if (handling === "omskriv" && !beroerte.length) return setFejl("Ingen opslag at skrive om.");
 
     setVenter(true);
     const res = await kaldApi("claude-lokal", krop);
@@ -1655,11 +2853,15 @@ function RetKampagne({
 
     if (!res.ok) {
       setFejl(res.fejl);
-      if (handling === "omskriv") byggOmskriv(); else byggNy();
+      // Fejler den lokale vej, bygges prompten så copy/paste stadig er åben.
+      if (handling === "artikel") byggArtikel();
+      else if (handling === "omskriv") byggOmskriv();
+      else byggNy();
       return;
     }
 
-    if (handling === "omskriv") await anvendOmskrivning(res.resultat);
+    if (handling === "artikel") await gemArtikel(res.resultat);
+    else if (handling === "omskriv") await anvendOmskrivning(res.resultat);
     else await anvendNy(res.resultat);
   }
 
@@ -1699,7 +2901,7 @@ function RetKampagne({
   }
 
   // ---- Ny brief ----
-  function byggNy() {
+  async function byggNy() {
     setFejl("");
     if (!nyBrief.trim()) return setFejl("Skriv den nye brief.");
     if (!platforme.length) return setFejl("Kunden har ingen aktive kanaler.");
@@ -1707,6 +2909,8 @@ function RetKampagne({
     setPrompt(byggPrompt({
       brand, navn: navn.trim(), brief: nyBrief.trim(), maal: maal.trim(),
       antal, kanaler: platforme, start: start || kampagne.starts_on, slut,
+      rettelser: await hentRettelser(kampagne.brand_id),
+      arketype, strategi, vinkler, sprog, retningslinjer: regler,
     }));
     setKopieret(false);
   }
@@ -1728,6 +2932,21 @@ function RetKampagne({
       if (error) { setVenter(false); return setFejl(error.message); }
     }
 
+    // Kampagnen husker sin afsender, så en senere omskrivning starter det
+    // rigtige sted. Uden det ville valget kun leve i dialogen.
+    const gemtVinkler = (kampagne.vinkel_ids ?? []).join(",");
+    if ((kampagne.arketype_id ?? "") !== arketypeId
+      || (kampagne.strategi_id ?? "") !== strategiId
+      || (kampagne.sprog ?? "da") !== sprog
+      || gemtVinkler !== vinkelIds.join(",")) {
+      await supabase.from("campaigns").update({
+        arketype_id: arketypeId || null,
+        strategi_id: strategiId || null,
+        vinkel_ids: vinkelIds,
+        sprog,
+      }).eq("id", kampagne.id);
+    }
+
     const startDato = start || kampagne.starts_on;
     let oprettede = 0;
 
@@ -1737,6 +2956,8 @@ function RetKampagne({
         .insert({
           campaign_id: kampagne.id, brand_id: kampagne.brand_id, body: o.tekst,
           hashtags: o.hashtags, image_brief: o.billedbrief,
+          body_original: o.tekst, hashtags_original: o.hashtags,
+          krog_alt: o.krogAlt || null,
           scheduled_at: tidspunkt(startDato, o.dag, o.klokke), status: "needs_approval",
         })
         .select().single();
@@ -1766,11 +2987,15 @@ function RetKampagne({
     ["tid", "Flyt i tid"],
     ["omskriv", "Skriv om"],
     ["ny", "Ny brief"],
+    ["artikel", "Artikel"],
+    ["slet", "Slet"],
   ];
 
   // Flytningen tager hele kampagnen, ikke et udsnit — så tælleren "det her
   // rører" ville sige noget forkert. Den har sin egen opsummering.
-  const roererOpslag = tilstand !== "felter" && tilstand !== "flytbrand";
+  const roererOpslag =
+    tilstand !== "felter" && tilstand !== "flytbrand" &&
+    tilstand !== "slet" && tilstand !== "artikel";
 
   return (
     <div style={mobil ? styles.overlayMobil : styles.overlay}
@@ -1791,6 +3016,53 @@ function RetKampagne({
             </button>
           ))}
         </div>
+
+        {/* Afsenderen gælder både «Skriv om» og «Ny brief» — begge skriver
+            tekst, og begge skal lyde som den samme person som resten af
+            serien. Derfor står den her og ikke inde i hver fane. */}
+        {(tilstand === "omskriv" || tilstand === "ny") && arketyper.length > 0 && (
+          <div style={{ padding: "12px 20px 0" }}>
+            <Felt mrk="Afsender" bredde={360}>
+              <select style={styles.input} value={arketypeId}
+                onChange={(e) => { setArketypeId(e.target.value); setPrompt(""); }}>
+                <option value="">Ingen — brug kun brandprofilen</option>
+                {arketyper.map((a) => <option key={a.id} value={a.id}>{a.navn}</option>)}
+              </select>
+              {arketype && (
+                <p style={{ ...styles.dæmpetLille, marginTop: 6 }}>{arketype.beskrivelse}</p>
+              )}
+            </Felt>
+
+            {/* Kun «Ny brief». En omskrivning retter tekster der allerede
+                findes — der er ingen serie at fordele, og et strategivalg
+                ville love en virkning det ikke har. */}
+            {tilstand === "ny" && planer.length > 0 && (
+              <Felt mrk="Strategi" bredde={360}>
+                <select style={styles.input} value={strategiId}
+                  onChange={(e) => { setStrategiId(e.target.value); setPrompt(""); }}>
+                  <option value="">Ingen — modellen fordeler selv</option>
+                  {planer.map((p) => <option key={p.id} value={p.id}>{p.navn}</option>)}
+                </select>
+                {strategi && (
+                  <p style={{ ...styles.dæmpetLille, marginTop: 6 }}>{strategi.beskrivelse}</p>
+                )}
+              </Felt>
+            )}
+
+            {tilstand === "ny" && (
+              <Vinkelvalg vinkler={alleVinkler} valgte={vinkelIds} antal={antal}
+                saetValgte={(v) => { setVinkelIds(v); setPrompt(""); }} />
+            )}
+
+            {/* Sproget gælder begge faner. En omskrivning af en engelsk
+                serie skal blive på engelsk — og skifter man her, er det
+                netop måden at oversætte en serie på. */}
+            <Sprogvalg vaerdi={sprog} saetVaerdi={(v) => { setSprog(v); setPrompt(""); }}
+              hjaelp={sprog !== (kampagne.sprog ?? "da")
+                ? "Du har skiftet sproget. Kør serien igennem for at få teksterne på det nye sprog."
+                : undefined} />
+          </div>
+        )}
 
         <div style={mobil ? styles.dialogKropMobil : styles.dialogKrop}>
           {roererOpslag && (
@@ -1910,6 +3182,244 @@ function RetKampagne({
               <p style={styles.dæmpetLille}>
                 Kanaler der allerede er publiceret bliver stående, uanset fluebenet — opslaget
                 er ude i verden, og det skal databasen blive ved at vise.
+              </p>
+            </>
+          )}
+
+          {/* ---- Artikel ---- */}
+          {tilstand === "artikel" && (
+            <>
+              <p style={styles.dæmpet}>
+                Samler seriens {liste.length} opslag til ét stykke. Ikke en
+                opsummering — opslagene var brudstykker af én pointe, og artiklen
+                skriver den sammen, med det der ikke var plads til.
+              </p>
+              <p style={styles.dæmpetLille}>
+                LinkedIns artikelplatform kan ikke skrives til gennem API'et, så
+                artiklen bliver stående her og kopieres ind i «Write article».
+              </p>
+
+              <Felt mrk="Særligt for denne artikel (valgfrit)">
+                <input style={styles.input} value={artikelInstruks}
+                  placeholder="fx Hold den under 800 ord. Slut med et spørgsmål."
+                  onChange={(e) => { setArtikelInstruks(e.target.value); setPrompt(""); }} />
+              </Felt>
+
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+                <button style={styles.primaryBtn} disabled={venter}
+                  onClick={() => koerLokalt("artikel")}>
+                  {venter ? <><Loader2 size={15} /> Claude skriver…</>
+                    : <><Sparkles size={15} /> Kør i Claude</>}
+                </button>
+                <button style={styles.secondaryBtn} onClick={byggArtikel}>
+                  Byg prompt til copy/paste
+                </button>
+              </div>
+
+              {prompt && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={styles.dt}>Prompt</div>
+                  <textarea readOnly style={{ ...styles.input, minHeight: 130, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}
+                    value={prompt} onFocus={(e) => e.target.select()} />
+                  <button style={{ ...styles.secondaryBtn, marginTop: 8 }}
+                    onClick={() => kopier(prompt)}>
+                    {kopieret ? "Kopieret ✓" : "Kopiér prompten"}
+                  </button>
+                </div>
+              )}
+
+              {prompt && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={styles.dt}>Indsæt Claudes svar</div>
+                  <textarea style={{ ...styles.input, minHeight: 110, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}
+                    value={svar} onChange={(e) => setSvar(e.target.value)} />
+                  <button style={{ ...styles.primaryBtn, marginTop: 8 }} disabled={venter || !svar.trim()}
+                    onClick={() => gemArtikel()}>
+                    {venter ? "Gemmer…" : "Gem artiklen"}
+                  </button>
+                </div>
+              )}
+
+              {artikel && (
+                <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+                  <div style={styles.dt}>
+                    Artiklen
+                    {kampagne.artikel_opdateret &&
+                      ` · skrevet ${visTid(kampagne.artikel_opdateret)}`}
+                  </div>
+                  <textarea style={{ ...styles.input, minHeight: 280, marginTop: 6, fontFamily: "inherit", lineHeight: 1.55 }}
+                    value={artikel} onChange={(e) => setArtikel(e.target.value)} />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                    <button style={styles.primaryBtn}
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(artikel);
+                          setArtikelKopieret(true);
+                          setTimeout(() => setArtikelKopieret(false), 3000);
+                        } catch {
+                          setFejl("Kunne ikke kopiere automatisk. Markér teksten og tryk Cmd+C.");
+                        }
+                      }}>
+                      {artikelKopieret ? "Kopieret ✓" : "Kopiér artiklen"}
+                    </button>
+                    {artikel !== (kampagne.artikel ?? "") && (
+                      <button style={styles.secondaryBtn} disabled={venter}
+                        onClick={async () => {
+                          setVenter(true);
+                          const { error } = await supabase.from("campaigns")
+                            .update({ artikel, artikel_opdateret: new Date().toISOString() })
+                            .eq("id", kampagne.id);
+                          setVenter(false);
+                          if (error) return setFejl(error.message);
+                          visToast("Rettelserne er gemt.");
+                          await genindlaes();
+                        }}>
+                        Gem rettelserne
+                      </button>
+                    )}
+                  </div>
+                  <p style={{ ...styles.dæmpetLille, marginTop: 8 }}>
+                    Første linje er titlen — den skal i LinkedIns titelfelt, ikke i brødteksten.
+                  </p>
+
+                  {/* ---- Coverbilledet ---- */}
+                  <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #E2E8F0" }}>
+                    <div style={styles.dt}>Coverbillede</div>
+                    <p style={styles.dæmpetLille}>
+                      Det brede billede øverst i artiklen. Claude foreslår en brief sammen
+                      med teksten — ret den frit, og lav billedet ud fra den.
+                    </p>
+
+                    {cover && (
+                      <img src={cover} alt="Coverbillede til artiklen"
+                        style={{ width: "100%", maxWidth: 520, borderRadius: 10, marginTop: 10,
+                          display: "block", border: "1px solid #E2E8F0" }} />
+                    )}
+
+                    <Felt mrk="Hvad skal coveret vise">
+                      <textarea style={{ ...styles.input, minHeight: 70, fontFamily: "inherit" }}
+                        value={coverBrief} onChange={(e) => setCoverBrief(e.target.value)}
+                        placeholder="fx En tom produktionshal i morgenlys, set fra gulvhøjde." />
+                    </Felt>
+
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                      <button style={styles.secondaryBtn} disabled={venter} onClick={foreslaaCover}>
+                        {venter ? <><Loader2 size={15} /> Claude tænker…</>
+                          : <><Sparkles size={15} /> Foreslå en brief ud fra artiklen</>}
+                      </button>
+                      <button style={styles.linkBtnLille}
+                        onClick={() => setCoverPrompt(byggCoverPrompt({ brand, artikel, arketype }))}>
+                        eller byg prompten
+                      </button>
+                    </div>
+
+                    {coverPrompt && (
+                      <div style={{ marginBottom: 12 }}>
+                        <textarea readOnly value={coverPrompt}
+                          style={{ ...styles.input, minHeight: 100, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }} />
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                          <button style={styles.secondaryBtn} onClick={() => kopier(coverPrompt)}>
+                            {kopieret ? "Kopieret ✓" : "Kopiér prompten"}
+                          </button>
+                          <button style={styles.linkBtnLille} onClick={() => setCoverPrompt("")}>
+                            Skjul
+                          </button>
+                        </div>
+                        <textarea placeholder="Indsæt Claudes svar her"
+                          style={{ ...styles.input, minHeight: 70, marginTop: 8, fontFamily: "inherit" }}
+                          value={coverSvar} onChange={(e) => setCoverSvar(e.target.value)} />
+                        <button style={{ ...styles.primaryBtn, marginTop: 8 }} disabled={!coverSvar.trim()}
+                          onClick={() => anvendCoverForslag()}>
+                          Brug forslaget
+                        </button>
+                      </div>
+                    )}
+
+                    {coverFejl && <p style={styles.fejlBoks}>{coverFejl}</p>}
+
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <button style={styles.primaryBtn} disabled={!coverBrief.trim()}
+                        onClick={() => setVaelgerCover(true)}>
+                        <ImageIcon size={15} /> {cover ? "Skift coverbillede" : "Lav coverbillede"}
+                      </button>
+                      {coverBrief.trim() !== (kampagne.artikel_billedbrief ?? "").trim() && (
+                        <button style={styles.secondaryBtn} onClick={gemCoverBrief}>
+                          Gem briefen
+                        </button>
+                      )}
+                      {cover && (
+                        <button style={styles.sletBtn} onClick={() => gemCover(null)}>
+                          <Trash2 size={13} /> Fjern coveret
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Billedvælgeren får et syntetisk «opslag»: den bruger kun
+                  billedbriefen og teksten til alt-tekst, og artiklen har
+                  begge dele. Bredformatet er det rigtige til et cover —
+                  LinkedIn viser det over hele artiklens bredde. */}
+              {vaelgerCover && brand && (
+                <BilledVaelger
+                  brand={brand}
+                  opslag={{ image_brief: coverBrief, body: artikel.split("\n")[0] ?? "" }}
+                  startFormat="bred"
+                  visToast={visToast}
+                  onValgt={gemCover}
+                  onLuk={() => setVaelgerCover(false)} />
+              )}
+            </>
+          )}
+
+          {/* ---- Slet ---- */}
+          {tilstand === "slet" && (
+            <>
+              <p style={styles.dæmpet}>
+                Sletter kampagnen og alle {liste.length} opslag der hører til den.
+                Det kan ikke fortrydes.
+              </p>
+
+              {publicerede.length > 0 ? (
+                <>
+                  <p style={styles.fejlBoks}>
+                    {publicerede.length} af opslagene er allerede publiceret. Sletter du
+                    kampagnen, forsvinder også kvitteringen for hvad der gik ud — links,
+                    tidspunkter og hvilke kanaler det blev sendt til. Opslagene bliver
+                    stående ude på LinkedIn, Facebook og Instagram; det er kun appens
+                    viden om dem der går tabt.
+                  </p>
+                  <Felt mrk={`Skriv «${kampagne.name}» for at bekræfte`}>
+                    <input style={styles.input} value={sletBekraeft}
+                      placeholder={kampagne.name}
+                      onChange={(e) => setSletBekraeft(e.target.value)} />
+                  </Felt>
+                </>
+              ) : (
+                <p style={styles.dæmpetLille}>
+                  Ingen af opslagene er publiceret, så der går intet tabt ude i verden.
+                </p>
+              )}
+
+              <button
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6, marginTop: 12,
+                  padding: "10px 16px", borderRadius: 9, border: "1px solid #B91C1C",
+                  background: "#B91C1C", color: "#fff", fontSize: 14, fontWeight: 600,
+                  cursor: "pointer",
+                }}
+                disabled={venter || (publicerede.length > 0 && sletBekraeft.trim() !== kampagne.name)}
+                onClick={slet}>
+                {venter
+                  ? <><Loader2 size={15} /> Sletter…</>
+                  : <><Trash2 size={14} /> Slet kampagnen og {liste.length} opslag</>}
+              </button>
+
+              <p style={{ ...styles.dæmpetLille, marginTop: 10 }}>
+                Vil du bare rydde op i kalenderen, kan du i stedet flytte kampagnen i tid
+                eller lade den ligge — en kampagne uden godkendte opslag publicerer
+                ingenting af sig selv.
               </p>
             </>
           )}
@@ -2114,10 +3624,13 @@ function RetKampagne({
    hverken logoer eller varemærker.
    ===================================================================== */
 
-function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
+function Forhaandsvisning({ liste, startIndex, brandFor, artikel, artikelCover, onLuk }) {
   const mobil = useMobil();
   const [index, setIndex] = useState(startIndex);
   const [visning, setVisning] = useState("mobil");
+  // Artiklen er ikke et opslag i serien, så den er en tilstand og ikke et
+  // ekstra trin i bladringen. Piletasterne skal blive ved at være seriens.
+  const [viserArtikel, setViserArtikel] = useState(false);
   const opslag = liste[index];
   const brand = opslag ? brandFor(opslag.brand_id) : null;
 
@@ -2157,9 +3670,10 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
   // man ser rytmen mellem opslagene, ikke bare det enkelte.
   useEffect(() => {
     const tast = (e) => {
+      if (e.key === "Escape") { onLuk(); return; }
+      if (viserArtikel) return;
       if (e.key === "ArrowRight") gaa(1);
       else if (e.key === "ArrowLeft") gaa(-1);
-      else if (e.key === "Escape") onLuk();
     };
     window.addEventListener("keydown", tast);
     return () => window.removeEventListener("keydown", tast);
@@ -2185,27 +3699,40 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
         <div style={styles.dialogHoved}>
           <h2 style={{ ...styles.h2, margin: 0 }}>Forhåndsvisning</h2>
           <span style={styles.dæmpetLille}>
-            {index + 1} af {liste.length} · piletaster bladrer
+            {viserArtikel
+              ? "Artiklen — som den læses på LinkedIn"
+              : `${index + 1} af ${liste.length} · piletaster bladrer`}
           </span>
           <div style={{ flex: 1 }} />
-          <button style={styles.ikonBtn} disabled={index === 0} onClick={() => gaa(-1)}>
-            <ChevronLeft size={16} />
-          </button>
-          <button style={styles.ikonBtn} disabled={index === liste.length - 1} onClick={() => gaa(1)}>
-            <ChevronRight size={16} />
-          </button>
+          {!viserArtikel && (
+            <>
+              <button style={styles.ikonBtn} disabled={index === 0} onClick={() => gaa(-1)}>
+                <ChevronLeft size={16} />
+              </button>
+              <button style={styles.ikonBtn} disabled={index === liste.length - 1} onClick={() => gaa(1)}>
+                <ChevronRight size={16} />
+              </button>
+            </>
+          )}
           <button style={styles.linkBtnLille} onClick={onLuk}><X size={14} /> Luk</button>
         </div>
 
         <div style={mobil ? styles.fanerMobil : styles.faner}>
-          {platforme.map((p) => (
+          {!viserArtikel && platforme.map((p) => (
             <button key={p} style={platform === p ? styles.faneAktiv : styles.fane}
               onClick={() => setPlatform(p)}>
               {REGLER[p].navn}
             </button>
           ))}
+          {artikel && (
+            <button style={viserArtikel ? styles.faneAktiv : styles.fane}
+              onClick={() => setViserArtikel((v) => !v)}>
+              <FileText size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+              {viserArtikel ? "Tilbage til opslagene" : "Artikel"}
+            </button>
+          )}
           <div style={{ flex: 1 }} />
-          {["mobil", "computer"].map((v) => (
+          {!viserArtikel && ["mobil", "computer"].map((v) => (
             <button key={v} style={visning === v ? styles.faneAktiv : styles.fane}
               onClick={() => setVisning(v)}>
               {v === "mobil" ? "Mobil" : "Computer"}
@@ -2214,6 +3741,13 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
         </div>
 
         <div style={mobil ? styles.dialogKropMobil : styles.dialogKrop}>
+          {viserArtikel ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 24px" }}>
+              <div style={{ width: "100%", maxWidth: 680 }}>
+                <ArtikelVisning tekst={artikel} cover={artikelCover} maxBredde="100%" />
+              </div>
+            </div>
+          ) : (
           <div style={styles.toKolonner}>
             {/* ---- Feed-attrappen ---- */}
             <div style={{ maxWidth: visning === "mobil" ? 400 : "100%", margin: "0 auto", width: "100%" }}>
@@ -2331,6 +3865,7 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
               </dl>
             </div>
           </div>
+          )}
         </div>
       </div>
     </div>
@@ -2344,9 +3879,12 @@ function Forhaandsvisning({ liste, startIndex, brandFor, onLuk }) {
    browseren, og en AI-baggrund. De tre første koster ingenting.
    ===================================================================== */
 
-function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
+function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk, startFormat }) {
   const mobil = useMobil();
-  const [fane, setFane] = useState("arkiv");
+  // Et coverbillede til en artikel starter på bredformat; et opslagsbillede
+  // på kvadrat. Ellers skal man huske at skifte hver gang, og det gør man
+  // ikke — man opdager det når billedet er beskåret forkert.
+  const [fane, setFane] = useState(startFormat ? "ai" : "arkiv");
   const [arkiv, setArkiv] = useState([]);
   const [henter, setHenter] = useState(true);
   const [venter, setVenter] = useState("");
@@ -2445,11 +3983,13 @@ function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk }) {
 
           {fane === "skabelon" && (
             <SkabelonFane brand={brand} opslag={opslag} arkiv={arkiv} venter={venter === "skabelon"}
+              startFormat={startFormat}
               onGem={(blob, opskrift) => gem(blob, "skabelon", opskrift)} />
           )}
 
           {fane === "ai" && (
-            <AiFane venter={venter === "ai"} onFejl={setFejl}
+            <AiFane venter={venter === "ai"} onFejl={setFejl} opslag={opslag}
+              startFormat={startFormat}
               onBillede={(blob, beskrivelse) => gem(blob, "ai", { beskrivelse })} />
           )}
         </div>
@@ -2484,8 +4024,8 @@ function UploadFane({ venter, onFil }) {
   );
 }
 
-function SkabelonFane({ brand, opslag, arkiv, venter, onGem }) {
-  const [format, setFormat] = useState("kvadrat");
+function SkabelonFane({ brand, opslag, arkiv, venter, onGem, startFormat }) {
+  const [format, setFormat] = useState(startFormat ?? "kvadrat");
   const [baggrund, setBaggrund] = useState("");
   const [overskrift, setOverskrift] = useState(() => foersteLinje(opslag?.body ?? "", 90));
   const [under, setUnder] = useState("");
@@ -2588,9 +4128,19 @@ function SkabelonFane({ brand, opslag, arkiv, venter, onGem }) {
   );
 }
 
-function AiFane({ venter, onBillede, onFejl }) {
-  const [beskrivelse, setBeskrivelse] = useState("");
-  const [format, setFormat] = useState("kvadrat");
+function AiFane({ venter, onBillede, onFejl, opslag, startFormat }) {
+  // Billedbriefen står allerede på opslaget — Claude skrev den sammen med
+  // teksten, netop for at beskrive hvad billedet skal vise. At skulle
+  // skrive den igen her var dobbeltarbejde, og det man skrev i anden
+  // omgang var som regel dårligere, fordi konteksten var væk.
+  //
+  // Den kan rettes frit. Feltet er et udgangspunkt, ikke en låsning.
+  const [beskrivelse, setBeskrivelse] = useState(opslag?.image_brief ?? "");
+  // Har opslaget en billedbrief, beskriver den et motiv — det er det den
+  // er til for. Så starter vi der. Uden brief er baggrund det rigtige
+  // udgangspunkt: den kan altid bruges under skabelonen.
+  const [slags, setSlags] = useState(opslag?.image_brief ? "motiv" : "baggrund");
+  const [format, setFormat] = useState(startFormat ?? "kvadrat");
   const [henter, setHenter] = useState(false);
   const [resultat, setResultat] = useState(null);
 
@@ -2599,12 +4149,16 @@ function AiFane({ venter, onBillede, onFejl }) {
   async function generer() {
     setHenter(true);
     onFejl("");
-    const svar = await kaldApi("ai-baggrund", { beskrivelse, format });
+    const svar = await kaldApi("ai-baggrund", { beskrivelse, format, slags });
     setHenter(false);
 
     if (!svar.ok) { onFejl(svar.fejl); return; }
 
-    const blob = base64TilBlob(svar.base64, svar.mimeType);
+    const raa = base64TilBlob(svar.base64, svar.mimeType);
+    // Cloudflares model leverer altid et kvadrat. Den beskæres her, så
+    // formatvalget ovenfor betyder det samme uanset hvem der lavede
+    // billedet.
+    const blob = svar.kvadratisk ? await tilpasFormat(raa, format) : raa;
     setResultat({ blob, url: URL.createObjectURL(blob) });
   }
 
@@ -2612,16 +4166,24 @@ function AiFane({ venter, onBillede, onFejl }) {
     <div style={styles.toKolonner}>
       <div>
         <p style={styles.dæmpet}>
-          Kun baggrunde — flader, teksturer, stemninger. Ingen mennesker, ingen lokaler,
-          ingen tekst i billedet.
+          {slags === "motiv"
+            ? "Et billede der kan stå alene i feedet."
+            : "En flade at lægge tekst ovenpå — teksturer og stemninger, ikke et motiv."}
         </p>
         <p style={styles.dæmpetLille}>
-          Det er et bevidst valg. Begge kunder sælger på at være ægte og lokale, og et
-          opdigtet foto af «vores folk» arbejder imod det. Læg selv tekst på bagefter med
-          skabelonen.
+          Aldrig mennesker, tekst eller genkendelige varemærker. Det er et bevidst
+          valg: afsenderen her sælger på at have været der selv, og et opdigtet
+          foto af «vores folk» arbejder direkte imod det.
         </p>
 
         <div style={{ marginTop: 14 }}>
+          <Felt mrk="Slags">
+            <select style={styles.input} value={slags} onChange={(e) => setSlags(e.target.value)}>
+              <option value="motiv">Motiv — billedet selv</option>
+              <option value="baggrund">Baggrund — til tekst ovenpå</option>
+            </select>
+          </Felt>
+
           <Felt mrk="Format">
             <select style={styles.input} value={format} onChange={(e) => setFormat(e.target.value)}>
               {Object.entries(FORMATER).map(([id, f]) => (
@@ -2630,23 +4192,33 @@ function AiFane({ venter, onBillede, onFejl }) {
             </select>
           </Felt>
 
-          <Felt mrk="Hvad skal baggrunden vise">
+          <Felt mrk={slags === "motiv" ? "Hvad skal billedet vise" : "Hvad skal baggrunden vise"}
+            hjaelp={opslag?.image_brief ? "Hentet fra opslagets billedbrief. Ret den frit." : undefined}>
             <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit" }}
               value={beskrivelse} onChange={(e) => setBeskrivelse(e.target.value)}
-              placeholder="fx Blødt morgenlys på en ren, lys flade. Rolige grå og grønne toner." />
+              placeholder={slags === "motiv"
+                ? "fx Et vægur i en produktionshal, maskiner ude af fokus i baggrunden."
+                : "fx Blødt morgenlys på en ren, lys flade. Rolige grå og grønne toner."} />
           </Felt>
 
+          {opslag?.image_brief && beskrivelse.trim() !== opslag.image_brief.trim() && (
+            <button style={styles.linkBtnLille}
+              onClick={() => setBeskrivelse(opslag.image_brief)}>
+              Hent billedbriefen ind igen
+            </button>
+          )}
+
           <button style={styles.secondaryBtn} disabled={henter || !beskrivelse.trim()} onClick={generer}>
-            {henter ? <><Loader2 size={15} /> Genererer…</> : <><Sparkles size={15} /> Generér baggrund</>}
+            {henter ? <><Loader2 size={15} /> Genererer…</>
+              : <><Sparkles size={15} /> Generér {slags === "motiv" ? "billede" : "baggrund"}</>}
           </button>
-          <p style={styles.dæmpetLille}>Koster omkring 0,30–1 kr per billede.</p>
         </div>
       </div>
 
       <div>
         {resultat ? (
           <>
-            <img src={resultat.url} alt="AI-baggrund" style={styles.forhaandsvisning} />
+            <img src={resultat.url} alt="AI-genereret billede" style={styles.forhaandsvisning} />
             <button style={{ ...styles.primaryBtn, marginTop: 10 }} disabled={venter}
               onClick={() => onBillede(resultat.blob, beskrivelse)}>
               {venter ? <><Loader2 size={15} /> Gemmer…</> : "Gem i arkivet og brug"}
@@ -2658,7 +4230,7 @@ function AiFane({ venter, onBillede, onFejl }) {
         ) : (
           <div style={styles.tomForhaandsvisning}>
             <Sparkles size={26} color="#94A3B8" />
-            <span style={styles.dæmpetLille}>Ingen baggrund endnu</span>
+            <span style={styles.dæmpetLille}>Intet billede endnu</span>
           </div>
         )}
       </div>
@@ -2677,6 +4249,382 @@ function AiFane({ venter, onBillede, onFejl }) {
    org_members kræver ejer — men vi viser det heller ikke, for en knap der
    altid fejler er værre end ingen knap.
    ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   Afsender: arketyper og retningslinjer
+
+   Arketypen er HVEM der skriver. Den samme viden fortalt af en der har
+   bygget systemet, en der har ryddet op efter det, og en der ikke tror
+   på det, giver tre forskellige opslag — og det er et valg man træffer
+   per kampagne, ikke en egenskab ved brandet.
+
+   Retningslinjerne er HVORDAN der skrives. De stod i koden, hvilket var
+   fint så længe appen skrev for en rengøringsvirksomhed, og forkert i det
+   øjeblik den også skal skrive for et menneske.
+   --------------------------------------------------------------------- */
+
+/**
+ * Er fejlen «databasen mangler migrationen»?
+ *
+ * Den slags fejl er den mest forvirrende af alle i denne app: knappen
+ * virker, intet sker, og feltet står tomt igen bagefter. Derfor oversættes
+ * den til hvad man skal gøre, i stedet for til Postgres' egne ord.
+ *
+ * 42P01 tabel findes ikke · 42703 kolonne findes ikke ·
+ * PGRST205 PostgREST kender ikke tabellen i sin skema-cache.
+ */
+function manglerMigration(fejl) {
+  if (!fejl) return false;
+  return ["42P01", "42703", "PGRST205", "PGRST204"].includes(fejl.code);
+}
+
+const MIGRATIONSBESKED =
+  "Databasen er ikke opdateret til denne version af appen. Kør «npm run db:setup» " +
+  "i projektmappen — så tilføjes det der mangler, og siden virker.";
+
+function Afsender({ org, visToast, genindlaes }) {
+  const [arketyper, setArketyper] = useState([]);
+  const [strategier, setStrategier] = useState([]);
+  const [regler, setRegler] = useState("");
+  const [orgSprog, setOrgSprog] = useState(org?.sprog ?? "da");
+  const [venter, setVenter] = useState("");
+  const [ny, setNy] = useState({ navn: "", beskrivelse: "" });
+  const [skemafejl, setSkemafejl] = useState(false);
+
+  const hent = useCallback(async () => {
+    if (!org?.id) return;
+    const { data, error } = await supabase
+      .from("arketyper").select("*").eq("organisation_id", org.id)
+      .order("sortering").order("navn");
+    // Fejlen blev slugt før. En tom liste og en manglende tabel ser ens ud
+    // på skærmen, og det er præcis forskellen man har brug for at kende.
+    if (manglerMigration(error)) setSkemafejl(true);
+    setArketyper(data ?? []);
+
+    const { data: str, error: strFejl } = await supabase
+      .from("strategier").select("*").eq("organisation_id", org.id)
+      .order("niveau").order("sortering").order("navn");
+    if (manglerMigration(strFejl)) setSkemafejl(true);
+    setStrategier(str ?? []);
+  }, [org?.id]);
+
+  useEffect(() => { hent(); }, [hent]);
+  // Kun når organisationen skifter. Tidligere lyttede den også på selve
+  // teksten, og så kunne en hvilken som helst genindlæsning kaste noget
+  // ugemt væk mens man skrev. At miste en indsat tekst er dyrere end at
+  // vise en et sekund forældet.
+  useEffect(() => { setRegler(org?.retningslinjer ?? ""); }, [org?.id]);
+  useEffect(() => { setOrgSprog(org?.sprog ?? "da"); }, [org?.id, org?.sprog]);
+
+  // Kun udgangspunktet for nye kampagner. Eksisterende kampagner beholder
+  // det sprog de blev skrevet paa -- ellers ville et skift her betyde at
+  // en omskrivning af en gammel serie pludselig kom tilbage paa engelsk.
+  async function gemSprog(v) {
+    setOrgSprog(v);
+    const { data, error } = await supabase.from("organisations")
+      .update({ sprog: v }).eq("id", org.id).select("id");
+    if (manglerMigration(error)) { setSkemafejl(true); return visToast(MIGRATIONSBESKED, false); }
+    if (error) return visToast(error.message, false);
+    if (!data?.length) {
+      return visToast("Intet blev gemt — det er kun ejeren der kan rette sproget.", false);
+    }
+    visToast(`Nye kampagner starter på ${SPROG[v]?.navn?.toLowerCase() ?? v}.`);
+    await genindlaes();
+  }
+
+  async function gemRegler() {
+    setVenter("regler");
+    // .select() er ikke pynt. Uden den svarer PostgREST 204 uanset om der
+    // blev rettet en raekke eller nul, og en raekkeadgangsregel der siger
+    // nej ser praecis ud som et vellykket gem: ingen fejl, ingen aendring.
+    // Med den kommer de rettede raekker tilbage, og nul raekker kan siges
+    // hoejt i stedet for at ligne succes indtil siden genindlaeses.
+    const { data, error } = await supabase.from("organisations")
+      .update({ retningslinjer: regler.trim() || null })
+      .eq("id", org.id).select("id");
+    setVenter("");
+    if (manglerMigration(error)) { setSkemafejl(true); return visToast(MIGRATIONSBESKED, false); }
+    if (error) return visToast(error.message, false);
+    if (!data?.length) {
+      return visToast(
+        "Intet blev gemt. Det er kun ejeren af organisationen der kan rette " +
+        "retningslinjerne — er du logget ind som den rigtige bruger?",
+        false,
+      );
+    }
+    visToast(regler.trim() ? "Retningslinjer gemt." : "Tilbage til de indbyggede retningslinjer.");
+    await genindlaes();
+  }
+
+  async function opret() {
+    if (!ny.navn.trim() || !ny.beskrivelse.trim()) {
+      return visToast("Både navn og beskrivelse skal udfyldes.", false);
+    }
+    setVenter("ny");
+    const { error } = await supabase.from("arketyper").insert({
+      organisation_id: org.id, navn: ny.navn.trim(), beskrivelse: ny.beskrivelse.trim(),
+    });
+    setVenter("");
+    if (manglerMigration(error)) { setSkemafejl(true); return visToast(MIGRATIONSBESKED, false); }
+    if (error) {
+      return visToast(
+        error.code === "23505" ? "Der findes allerede en arketype med det navn." : error.message,
+        false,
+      );
+    }
+    setNy({ navn: "", beskrivelse: "" });
+    await hent();
+  }
+
+  async function gem(a, felter) {
+    const { error } = await supabase.from("arketyper")
+      .update({ ...felter, updated_at: new Date().toISOString() }).eq("id", a.id);
+    if (error) return visToast(error.message, false);
+    await hent();
+  }
+
+  async function slet(a) {
+    if (!window.confirm(`Slet arketypen «${a.navn}»?\n\nKampagner der bruger den beholder deres opslag — de mister bare rollen.`)) return;
+    const { error } = await supabase.from("arketyper").delete().eq("id", a.id);
+    if (error) return visToast(error.message, false);
+    await hent();
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {skemafejl && <p style={styles.fejlBoks}>{MIGRATIONSBESKED}</p>}
+
+      <div style={styles.kort}>
+        <h2 style={styles.h2}>Arketyper</h2>
+        <p style={styles.dæmpetLille}>
+          Hvem skriver opslaget, og med hvilken ret. Vælges på hver kampagne.
+          Skriv beskrivelsen i anden person — det er den rolle modellen skal
+          <em> være</em>, ikke en den skal beskrive.
+        </p>
+
+        {arketyper.length === 0 && (
+          <p style={{ ...styles.dæmpet, marginTop: 12 }}>
+            Ingen endnu. Eksempler der virker: «Løsningsarkitekten» — du har
+            siddet i fem S/4-implementeringer og ved hvor de knækker.
+            «Praktikeren» — du har ryddet op efter andres beslutninger.
+            «Skeptikeren» — du stiller det spørgsmål alle går udenom.
+          </p>
+        )}
+
+        {arketyper.map((a) => (
+          <ArketypeRaekke key={a.id} arketype={a} onGem={gem} onSlet={slet} />
+        ))}
+
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+          <div style={styles.dt}>Ny arketype</div>
+          <Felt mrk="Navn" bredde={260}>
+            <input style={styles.input} value={ny.navn}
+              placeholder="Løsningsarkitekten"
+              onChange={(e) => setNy((n) => ({ ...n, navn: e.target.value }))} />
+          </Felt>
+          <Felt mrk="Sådan skriver du">
+            <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit" }}
+              value={ny.beskrivelse}
+              placeholder="Du er løsningsarkitekt og arbejder med SAP OTC og CX. Du har siddet i implementeringerne selv, så du skriver om det der faktisk sker — ikke om det der står i salgsmaterialet."
+              onChange={(e) => setNy((n) => ({ ...n, beskrivelse: e.target.value }))} />
+          </Felt>
+          <button style={styles.primaryBtn} disabled={venter === "ny"} onClick={opret}>
+            {venter === "ny" ? "Opretter…" : "Tilføj arketype"}
+          </button>
+        </div>
+      </div>
+
+      <StrategiKort org={org} strategier={strategier} visToast={visToast}
+        genhent={hent} setSkemafejl={setSkemafejl} />
+
+      <div style={styles.kort}>
+        <h2 style={styles.h2}>Sprog</h2>
+        <p style={styles.dæmpetLille}>
+          Udgangspunktet for nye kampagner. Du kan skifte det på hver enkelt
+          kampagne — fagligt indhold på LinkedIn når typisk længere på engelsk,
+          mens Facebook og Instagram som regel har lokale følgere.
+        </p>
+        <Sprogvalg vaerdi={orgSprog} saetVaerdi={gemSprog} mrk="Standardsprog" />
+      </div>
+
+      <div style={styles.kort}>
+        <h2 style={styles.h2}>Retningslinjer</h2>
+        <p style={styles.dæmpetLille}>
+          Står først i hver prompt. Lad feltet stå tomt for at bruge de
+          indbyggede — de er ikke tomme, de står bare i koden.
+        </p>
+        <textarea
+          style={{ ...styles.input, minHeight: 320, fontFamily: "ui-monospace, monospace", fontSize: 13 }}
+          value={regler} placeholder={STANDARD_RETNINGSLINJER}
+          onChange={(e) => setRegler(e.target.value)} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+          <button style={styles.primaryBtn} disabled={!!venter} onClick={gemRegler}>
+            {venter === "regler" ? "Gemmer…" : "Gem"}
+          </button>
+          <button style={styles.secondaryBtn} disabled={!!venter}
+            onClick={() => setRegler(STANDARD_RETNINGSLINJER)}>
+            Hent de indbyggede ind
+          </button>
+          {regler.trim() && (
+            <button style={styles.secondaryBtn} disabled={!!venter} onClick={() => setRegler("")}>
+              Ryd og brug de indbyggede
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Strategierne, delt i de to niveauer de faktisk er.
+ *
+ * De blev lagt i databasen frem for i koden af samme grund som
+ * retningslinjerne i 0010: den dag «Challenger» er for hård til en
+ * bestemt afsender, skal formuleringen kunne rettes uden en deploy.
+ *
+ * Hver organisation får de femten standarder ved oprettelsen. De er et
+ * udgangspunkt, ikke en facitliste — rettes eller slettes frit.
+ */
+function StrategiKort({ org, strategier, visToast, genhent, setSkemafejl }) {
+  const [niveau, setNiveau] = useState("kampagne");
+  const [ny, setNy] = useState({ navn: "", beskrivelse: "" });
+  const [venter, setVenter] = useState(false);
+
+  const vist = strategier.filter((s) => s.niveau === niveau);
+
+  const tekst = niveau === "kampagne"
+    ? {
+        titel: "Kampagnestrategier",
+        forklar: "Planen for serien som helhed. Én vælges per kampagne, og den bestemmer hvordan opslagene fordeler sig — ikke hvordan det enkelte opslag er skruet sammen.",
+        navnEks: "Tragt",
+        tekstEks: "Byg serien som en tragt. De første opslag skaber opmærksomhed og sælger ingenting. De sidste beder om ét konkret næste skridt.",
+      }
+    : {
+        titel: "Vinkler",
+        forklar: "Grebene i det enkelte opslag. Flere vælges per kampagne, og de fordeles hen over serien. Navnet ender aldrig i teksten — det er en arbejdsanvisning til modellen.",
+        navnEks: "Mytenedbrydning",
+        tekstEks: "Tag en antagelse alle nikker til, og vis hvorfor den ikke holder. Vær fair over for den du modsiger — stråmænd bliver gennemskuet.",
+      };
+
+  async function opret() {
+    if (!ny.navn.trim() || !ny.beskrivelse.trim()) {
+      return visToast("Både navn og beskrivelse skal udfyldes.", false);
+    }
+    setVenter(true);
+    const { error } = await supabase.from("strategier").insert({
+      organisation_id: org.id, niveau,
+      navn: ny.navn.trim(), beskrivelse: ny.beskrivelse.trim(),
+      // Nye lægger sig bagest. Standardernes sortering går til 100.
+      sortering: 200,
+    });
+    setVenter(false);
+    if (manglerMigration(error)) { setSkemafejl(true); return visToast(MIGRATIONSBESKED, false); }
+    if (error) {
+      return visToast(
+        error.code === "23505" ? "Der findes allerede en med det navn på dette niveau." : error.message,
+        false,
+      );
+    }
+    setNy({ navn: "", beskrivelse: "" });
+    await genhent();
+  }
+
+  async function gem(r, felter) {
+    const { error } = await supabase.from("strategier")
+      .update({ ...felter, updated_at: new Date().toISOString() }).eq("id", r.id);
+    if (error) return visToast(error.message, false);
+    await genhent();
+  }
+
+  async function slet(r) {
+    if (!window.confirm(`Slet «${r.navn}»?\n\nKampagner der bruger den beholder deres opslag — de mister bare valget.`)) return;
+    const { error } = await supabase.from("strategier").delete().eq("id", r.id);
+    if (error) return visToast(error.message, false);
+    await genhent();
+  }
+
+  return (
+    <div style={styles.kort}>
+      <h2 style={styles.h2}>Strategi</h2>
+      <p style={styles.dæmpetLille}>
+        Hvad der er planen med opslagene. Arketypen er hvem der skriver,
+        retningslinjerne er hvordan — det her er hvad serien skal gøre.
+      </p>
+
+      <div style={{ display: "flex", gap: 8, margin: "12px 0 4px" }}>
+        {["kampagne", "vinkel"].map((n) => (
+          <button key={n}
+            style={niveau === n ? styles.primaryBtn : styles.secondaryBtn}
+            onClick={() => { setNiveau(n); setNy({ navn: "", beskrivelse: "" }); }}>
+            {n === "kampagne" ? "Kampagnestrategier" : "Vinkler"}
+          </button>
+        ))}
+      </div>
+
+      <p style={{ ...styles.dæmpetLille, marginTop: 10 }}>{tekst.forklar}</p>
+
+      {vist.length === 0 && (
+        <p style={{ ...styles.dæmpet, marginTop: 12 }}>
+          Ingen endnu. De femten standarder oprettes sammen med organisationen
+          — mangler de, er databasen ikke opdateret.
+        </p>
+      )}
+
+      {vist.map((r) => (
+        <ArketypeRaekke key={r.id} arketype={r} onGem={gem} onSlet={slet} />
+      ))}
+
+      <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+        <div style={styles.dt}>Ny {niveau === "kampagne" ? "kampagnestrategi" : "vinkel"}</div>
+        <Felt mrk="Navn" bredde={260}>
+          <input style={styles.input} value={ny.navn} placeholder={tekst.navnEks}
+            onChange={(e) => setNy((n) => ({ ...n, navn: e.target.value }))} />
+        </Felt>
+        <Felt mrk="Sådan skal den bruges">
+          <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit" }}
+            value={ny.beskrivelse} placeholder={tekst.tekstEks}
+            onChange={(e) => setNy((n) => ({ ...n, beskrivelse: e.target.value }))} />
+        </Felt>
+        <button style={styles.primaryBtn} disabled={venter} onClick={opret}>
+          {venter ? "Opretter…" : "Tilføj"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ArketypeRaekke({ arketype, onGem, onSlet }) {
+  const [navn, setNavn] = useState(arketype.navn);
+  const [beskrivelse, setBeskrivelse] = useState(arketype.beskrivelse);
+  const [aktiv, setAktiv] = useState(arketype.aktiv);
+  const aendret = navn !== arketype.navn || beskrivelse !== arketype.beskrivelse;
+
+  return (
+    <div style={{ ...styles.kort, background: "#F8FAFC", marginTop: 12 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <input style={{ ...styles.input, width: 260, fontWeight: 600 }}
+          value={navn} onChange={(e) => setNavn(e.target.value)} />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5 }}>
+          <input type="checkbox" checked={aktiv}
+            onChange={(e) => { setAktiv(e.target.checked); onGem(arketype, { aktiv: e.target.checked }); }} />
+          Kan vælges
+        </label>
+        <button style={{ ...styles.sletBtn, marginLeft: "auto" }} onClick={() => onSlet(arketype)}>
+          <Trash2 size={13} /> Slet
+        </button>
+      </div>
+      <textarea style={{ ...styles.input, minHeight: 80, marginTop: 8, fontFamily: "inherit" }}
+        value={beskrivelse} onChange={(e) => setBeskrivelse(e.target.value)} />
+      {aendret && (
+        <button style={{ ...styles.primaryBtn, marginTop: 8 }}
+          onClick={() => onGem(arketype, { navn: navn.trim(), beskrivelse: beskrivelse.trim() })}>
+          Gem ændringer
+        </button>
+      )}
+    </div>
+  );
+}
 
 function Medlemmer({ org, session, visToast }) {
   const [liste, setListe] = useState(null);
@@ -2848,7 +4796,7 @@ function Kunder({ kunder, brands, kanalerFor, orgId, rolle, valgt, setValgt, vis
       <>
         <h1 style={styles.h1}>Kunder</h1>
         <p style={styles.dæmpet}>
-          Ingen kunder endnu. Kør <code>npm run db:setup</code>, eller opret en her.
+          Ingen kunder endnu — opret din første her.
         </p>
         {rolle === "ejer" && (
           <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={() => setNyKunde(true)}>
@@ -2980,6 +4928,28 @@ function Stamkort({ kunde, orgId, visToast, genindlaes, onAnnuller }) {
   const [token, setToken] = useState("");
   const [venter, setVenter] = useState("");
   const [testsvar, setTestsvar] = useState(null);
+  const [li, setLi] = useState(null);
+
+  // LinkedIn-forbindelsen hentes for sig. Den ligger i sin egen tabel og
+  // har sine egne datoer — og det er datoerne der er interessante. Uden
+  // dem opdages en udløbet adgang først den dag et opslag ikke kom ud.
+  useEffect(() => {
+    if (!kunde?.id) return undefined;
+    let afbrudt = false;
+    kaldApi("linkedin-oauth?trin=status", { kundeId: kunde.id })
+      .then((svar) => { if (!afbrudt) setLi(svar); });
+    return () => { afbrudt = true; };
+  }, [kunde?.id]);
+
+  async function forbindLinkedIn() {
+    setVenter("linkedin");
+    const svar = await kaldApi("linkedin-oauth?trin=start", { kundeId: kunde.id });
+    setVenter("");
+    if (!svar.ok) return visToast(svar.fejl, false);
+    // Hele vinduet, ikke et popup: LinkedIn viser ikke sin dialog i en
+    // iframe, og popup-vinduer blokeres af de fleste browsere som standard.
+    window.location.href = svar.url;
+  }
 
   const saet = (n) => (e) => setFelter((f) => ({ ...f, [n]: e.target.value }));
 
@@ -3080,7 +5050,7 @@ function Stamkort({ kunde, orgId, visToast, genindlaes, onAnnuller }) {
         <div style={{ marginTop: 12 }}>
           <Felt mrk="Navn">
             <input style={styles.input} value={felter.name} onChange={saet("name")}
-              placeholder="fx Jammerbugt Rengøring" />
+              placeholder="fx Andersen & Co" />
           </Felt>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <Felt mrk="Kontaktperson" bredde={200}>
@@ -3217,6 +5187,69 @@ function Stamkort({ kunde, orgId, visToast, genindlaes, onAnnuller }) {
           </div>
         )}
       </div>
+
+      <div style={styles.kort}>
+        <h2 style={styles.h2}>LinkedIn</h2>
+        <p style={styles.dæmpetLille}>
+          Opslag på en personlig profil. Modsat Meta findes der ikke et token
+          der aldrig udløber — adgangen skal fornys, og derfor står datoerne her.
+        </p>
+
+        {!kunde ? (
+          <p style={{ ...styles.dæmpet, marginTop: 14 }}>
+            Opret kunden først — så kan LinkedIn forbindes.
+          </p>
+        ) : (
+          <div style={{ marginTop: 14 }}>
+            {li?.forbundet ? (
+              <>
+                <p style={{ margin: 0, fontSize: 14 }}>
+                  Forbundet som <strong>{li.medlemNavn || li.medlemUrn}</strong>
+                </p>
+                <p style={styles.dæmpetLille}>{li.medlemUrn}</p>
+
+                {li.adgangDageTilbage != null && (
+                  <p style={
+                    li.adgangDageTilbage <= 0 ? styles.fejlBoks
+                      : li.adgangDageTilbage <= 7 ? styles.advarselBoks : styles.okBoks
+                  }>
+                    {li.adgangDageTilbage <= 0
+                      ? "Adgangen er udløbet. Forbind igen for at kunne publicere."
+                      : `Adgangen holder ${li.adgangDageTilbage} dage endnu.`}
+                  </p>
+                )}
+
+                {/* Refresh-tokenets år nulstilles ikke når adgangen fornys.
+                    Når det løber ud, skal der autoriseres forfra — og det
+                    skal siges i god tid, ikke den dag det sker. */}
+                {li.fornyelseDageTilbage != null && li.fornyelseDageTilbage <= 30 && (
+                  <p style={styles.advarselBoks}>
+                    Fornyelsen udløber om {li.fornyelseDageTilbage} dage. Derefter
+                    skal du godkende forfra.
+                  </p>
+                )}
+
+                {li.sidsteFejl && <p style={styles.fejlBoks}>{li.sidsteFejl}</p>}
+              </>
+            ) : (
+              <p style={styles.dæmpet}>Ikke forbundet endnu.</p>
+            )}
+
+            <button style={li?.forbundet ? styles.secondaryBtn : styles.primaryBtn}
+              disabled={!!venter} onClick={forbindLinkedIn}>
+              {venter === "linkedin" ? "Åbner LinkedIn…"
+                : li?.forbundet ? "Forbind igen" : "Forbind LinkedIn"}
+            </button>
+
+            {li?.forbundet && (
+              <p style={{ ...styles.dæmpetLille, marginTop: 10 }}>
+                Sæt profilens URN som forfatter på kundens LinkedIn-kanal, så
+                opslagene ved hvem de skrives som.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -3235,7 +5268,7 @@ function BrandBlok({ brand, kunde, kunder, soeskende = [], rolle, kanaler, visTo
   /**
    * Migrationen gav hvert eksisterende brand sin egen kunde, fordi den ikke
    * kan gætte hvilke der hører sammen. Her samler du dem — fx rengøring,
-   * hundevask og vaskeri under Jammerbugt Rengøring.
+   * hundevask og vaskeri under samme kunde.
    *
    * Kanaler og opslag følger med af sig selv: de hænger på brandet, ikke på
    * kunden. Det eneste der skifter, er hvilket token og hvilke fælles
@@ -3424,6 +5457,9 @@ function Brandprofil({ brand, visToast, genindlaes }) {
     description: brand.description ?? "",
     target_audience: brand.target_audience ?? "",
     tone_of_voice: brand.tone_of_voice ?? "",
+    eksempel_opslag: brand.eksempel_opslag ?? "",
+    maalgruppe_ved: brand.maalgruppe_ved ?? "",
+    maalgruppe_undgaa: brand.maalgruppe_undgaa ?? "",
     guardrails: brand.guardrails ?? "",
     primary: brand.colors?.primary ?? "#2F5DE0",
   });
@@ -3442,6 +5478,9 @@ function Brandprofil({ brand, visToast, genindlaes }) {
         description: felter.description,
         target_audience: felter.target_audience,
         tone_of_voice: felter.tone_of_voice,
+        eksempel_opslag: felter.eksempel_opslag,
+        maalgruppe_ved: felter.maalgruppe_ved,
+        maalgruppe_undgaa: felter.maalgruppe_undgaa,
         guardrails: felter.guardrails,
         colors: { ...(brand.colors ?? {}), primary: felter.primary },
       })
@@ -3468,9 +5507,24 @@ function Brandprofil({ brand, visToast, genindlaes }) {
         <textarea style={{ ...styles.input, minHeight: 70, fontFamily: "inherit" }}
           value={felter.target_audience} onChange={saet("target_audience")} />
       </Felt>
+      <Felt mrk="Det ved de allerede"
+        hjaelp="Hvad målgruppen kender i forvejen. Forhindrer opslag der forklarer det indlysende.">
+        <textarea style={{ ...styles.input, minHeight: 60, fontFamily: "inherit" }}
+          value={felter.maalgruppe_ved} onChange={saet("maalgruppe_ved")} />
+      </Felt>
+      <Felt mrk="Det er de trætte af"
+        hjaelp="Vinkler der er brugt op, floskler i branchen, budskaber alle andre kører med.">
+        <textarea style={{ ...styles.input, minHeight: 60, fontFamily: "inherit" }}
+          value={felter.maalgruppe_undgaa} onChange={saet("maalgruppe_undgaa")} />
+      </Felt>
       <Felt mrk="Tone of voice">
         <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit" }}
           value={felter.tone_of_voice} onChange={saet("tone_of_voice")} />
+      </Felt>
+      <Felt mrk="Eksempler på opslag der ramte rigtigt"
+        hjaelp="To-tre rigtige opslag, adskilt af en tom linje. Et eksempel styrer stemmen langt bedre end et adjektiv — modeller imiterer bedre end de adlyder.">
+        <textarea style={{ ...styles.input, minHeight: 130, fontFamily: "inherit" }}
+          value={felter.eksempel_opslag} onChange={saet("eksempel_opslag")} />
       </Felt>
       <Felt mrk="Må ikke" hjaelp="Fx samtykke til billeder af børn, forbud mod prisløfter, konkurrenter der ikke må nævnes.">
         <textarea style={{ ...styles.input, minHeight: 90, fontFamily: "inherit", borderLeft: "2px solid #B91C1C" }}
@@ -3493,6 +5547,20 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
   const [visningsnavn, setVisningsnavn] = useState(kanal?.display_name ?? "");
   const [pageId, setPageId] = useState(kanal?.page_id ?? "");
   const [igUserId, setIgUserId] = useState(kanal?.ig_user_id ?? "");
+  const [authorUrn, setAuthorUrn] = useState(kanal?.author_urn ?? "");
+
+  // URN'en er et uigennemsigtigt id — hverken til at slå op, huske eller
+  // skrive af. Den står på kunden efter «Forbind LinkedIn», så den hentes
+  // herind frem for at bede om afskrift. Kun når feltet er tomt: har du
+  // selv sat en anden ind, fx en firmasides URN, skal den ikke overskrives.
+  useEffect(() => {
+    if (platform !== "linkedin" || authorUrn || !kunde?.id) return undefined;
+    let afbrudt = false;
+    kaldApi("linkedin-oauth?trin=status", { kundeId: kunde.id }).then((svar) => {
+      if (!afbrudt && svar?.forbundet && svar.medlemUrn) setAuthorUrn(svar.medlemUrn);
+    });
+    return () => { afbrudt = true; };
+  }, [platform, authorUrn, kunde?.id]);
   const [token, setToken] = useState("");
   const [tokenLabel, setTokenLabel] = useState(kanal?.token_label ?? "");
   const [aktiv, setAktiv] = useState(kanal?.active ?? true);
@@ -3501,7 +5569,8 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
   async function gem() {
     setVenter("gem");
     const svar = await kaldApi("gem-kanal", {
-      kanalId: kanal?.id, brandId, platform, visningsnavn, pageId, igUserId, token, tokenLabel, aktiv,
+      kanalId: kanal?.id, brandId, platform, visningsnavn, pageId, igUserId, authorUrn,
+      token, tokenLabel, aktiv,
     });
     setVenter("");
 
@@ -3526,7 +5595,7 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
     setVenter("flyt");
     const svar = await kaldApi("gem-kanal", {
       kanalId: kanal.id, brandId: nytBrand,
-      platform, visningsnavn, pageId, igUserId, tokenLabel, aktiv,
+      platform, visningsnavn, pageId, igUserId, authorUrn, tokenLabel, aktiv,
     });
     setVenter("");
 
@@ -3627,7 +5696,7 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
           <select style={styles.input} value={platform} onChange={(e) => setPlatform(e.target.value)}>
             <option value="facebook">Facebook Side</option>
             <option value="instagram">Instagram</option>
-            <option value="linkedin">LinkedIn (ikke aktiv)</option>
+            <option value="linkedin">LinkedIn</option>
           </select>
         </Felt>
         <Felt mrk="Visningsnavn" bredde={220}>
@@ -3647,33 +5716,56 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
         </Felt>
       )}
 
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <Felt mrk="Page ID" bredde={220}>
-          <input style={styles.input} value={pageId} onChange={(e) => setPageId(e.target.value)} />
+      {/* Page ID og access token er Metas felter. LinkedIn har hverken
+          det ene eller det andet: forfatteren er en URN, og tokenet ligger
+          på kunden efter at du har forbundet den. */}
+      {platform === "linkedin" ? (
+        <Felt mrk="Forfatter (URN)" bredde={340}
+          hjaelp="Udfyldes selv når kunden er forbundet. Ret den kun hvis opslagene skal skrives af en anden — fx en firmaside, urn:li:organization:…">
+          <input style={styles.input} value={authorUrn}
+            placeholder="hentes når kunden er forbundet"
+            onChange={(e) => setAuthorUrn(e.target.value)} />
         </Felt>
-        {platform === "instagram" && (
-          <Felt mrk="Instagram Business Account ID" bredde={260}>
-            <input style={styles.input} value={igUserId} onChange={(e) => setIgUserId(e.target.value)} />
+      ) : (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Felt mrk="Page ID" bredde={220}>
+            <input style={styles.input} value={pageId} onChange={(e) => setPageId(e.target.value)} />
           </Felt>
-        )}
-      </div>
+          {platform === "instagram" && (
+            <Felt mrk="Instagram Business Account ID" bredde={260}>
+              <input style={styles.input} value={igUserId} onChange={(e) => setIgUserId(e.target.value)} />
+            </Felt>
+          )}
+        </div>
+      )}
 
-      <Felt
-        mrk="Access token"
-        hjaelp={kanal?.token_ciphertext
-          ? "Kanalen har sit eget token, som vinder over kundens."
-          : kunde?.token_ciphertext
-            ? `Arver kundens token${kunde.token_label ? ` (${kunde.token_label})` : ""}. Udfyld kun her hvis siden ligger i en ANDEN Business-portefølje.`
-            : "Hverken kanalen eller kunden har et token. Læg det helst på kunden — ét token dækker hele porteføljen."}
-      >
-        <input type="password" autoComplete="off" style={styles.input}
-          placeholder={kanal?.token_ciphertext ? "••••••••"
-            : kunde?.token_ciphertext ? "arver kundens" : "EAAG…"}
-          value={token} onChange={(e) => setToken(e.target.value)} />
-        <input style={{ ...styles.input, marginTop: 8 }} value={tokenLabel}
-          onChange={(e) => setTokenLabel(e.target.value)}
-          placeholder="Label, fx “system user 2026-08”" />
-      </Felt>
+      {/* Token-feltet er Metas. En LinkedIn-kanal bærer aldrig sit eget:
+          autorisationen hører til det menneske der gav den, og ligger på
+          kunden. At vise feltet her ville invitere til at udfylde noget
+          der aldrig bliver læst. */}
+      {platform === "linkedin" ? (
+        <p style={{ ...styles.dæmpetLille, marginBottom: 12 }}>
+          LinkedIn-adgangen ligger på kunden. Forbind den under
+          Kunder → Stamkort → LinkedIn, og sæt profilens URN ind ovenfor.
+        </p>
+      ) : (
+        <Felt
+          mrk="Access token"
+          hjaelp={kanal?.token_ciphertext
+            ? "Kanalen har sit eget token, som vinder over kundens."
+            : kunde?.token_ciphertext
+              ? `Arver kundens token${kunde.token_label ? ` (${kunde.token_label})` : ""}. Udfyld kun her hvis siden ligger i en ANDEN Business-portefølje.`
+              : "Hverken kanalen eller kunden har et token. Læg det helst på kunden — ét token dækker hele porteføljen."}
+        >
+          <input type="password" autoComplete="off" style={styles.input}
+            placeholder={kanal?.token_ciphertext ? "••••••••"
+              : kunde?.token_ciphertext ? "arver kundens" : "EAAG…"}
+            value={token} onChange={(e) => setToken(e.target.value)} />
+          <input style={{ ...styles.input, marginTop: 8 }} value={tokenLabel}
+            onChange={(e) => setTokenLabel(e.target.value)}
+            placeholder="Label, fx “system user 2026-08”" />
+        </Felt>
+      )}
 
       <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13.5, marginBottom: 12 }}>
         <input type="checkbox" checked={aktiv} onChange={(e) => setAktiv(e.target.checked)} />
@@ -3714,13 +5806,16 @@ function KanalKort({ kanal, brandId, kunde, soeskende = [], laesekun = false, vi
    ===================================================================== */
 
 const styles = {
-  // overflowX: hidden er et sikkerhedsnet: kommer der én gang et element der
-  // er bredere end skærmen, skal hele appen ikke kunne svippes sidelæns.
+  // Her stod overflowX: hidden før. Det gjorde topbjælkens position: sticky
+  // virkningsløs: en forfæder med overflow ≠ visible bliver selv
+  // rullebeholderen, og bjælken klæbede så til en kasse der aldrig ruller.
+  // Sikkerhedsnettet mod vandret svip ligger nu på selve siden i stedet.
   app: { background: "#F4F6FC", minHeight: "100vh", color: "#111111", display: "flex",
-    flexDirection: "column", overflowX: "hidden" },
+    flexDirection: "column" },
 
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 24px",
-    background: "#111111", color: "#fff", flexWrap: "wrap", gap: 12, position: "sticky", top: 0, zIndex: 100 },
+    background: "#111111", color: "#fff", flexWrap: "wrap", gap: 12, position: "sticky", top: 0, zIndex: 100,
+    boxShadow: "0 2px 10px rgba(0,0,0,0.18)" },
   brand: { display: "flex", alignItems: "center", gap: 12 },
   // Ikonet har sin egen afrundede baggrund, så her skal kun størrelsen sættes.
   brandMark: { width: 36, height: 36, borderRadius: 10, display: "block" },
@@ -3751,13 +5846,16 @@ const styles = {
   toast: { position: "fixed", top: 74, right: 24, color: "#fff", padding: "10px 16px", borderRadius: 8,
     fontSize: 13.5, zIndex: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.22)", maxWidth: 460 },
 
-  page: { padding: "20px 24px 60px", flex: 1, maxWidth: 1180, width: "100%", margin: "0 auto" },
-  pageMobil: { padding: "14px 12px 80px", flex: 1, width: "100%" },
+  page: { padding: "20px 24px 60px", flex: 1, maxWidth: 1180, width: "100%", margin: "0 auto",
+    minWidth: 0 },
+  pageMobil: { padding: "14px 12px 80px", flex: 1, width: "100%", minWidth: 0,
+    overflowX: "hidden" },
 
   // Telefon: to rækker i stedet for én. Navigationen ruller vandret frem for
   // at brydes om i tre linjer, som åd en tredjedel af skærmen.
   headerMobil: { display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px",
-    background: "#111111", color: "#fff", position: "sticky", top: 0, zIndex: 100 },
+    background: "#111111", color: "#fff", position: "sticky", top: 0, zIndex: 100,
+    boxShadow: "0 2px 10px rgba(0,0,0,0.18)" },
   brandMobil: { display: "flex", alignItems: "center", gap: 10, minWidth: 0 },
   navMobil: { display: "flex", gap: 4, overflowX: "auto", WebkitOverflowScrolling: "touch",
     paddingBottom: 2, scrollbarWidth: "none" },

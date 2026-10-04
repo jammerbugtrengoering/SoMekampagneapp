@@ -9,7 +9,7 @@ import { jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
  *
  * Tokenet ligger på kunden, fordi et Meta-systemtoken hører til en
  * Business-portefølje og dækker de sider det er tildelt — ét token til alle
- * Jammerbugts sider, ét sted at rotere det. En enkelt kanal kan stadig have
+ * kundens sider, ét sted at rotere det. En enkelt kanal kan stadig have
  * sit eget, hvis en side ligger i en anden portefølje.
  *
  * Med handling: "test" prøves tokenet mod hver af kundens kanaler, så du kan
@@ -20,7 +20,7 @@ import { jsonSvar, kraevOrgRolle } from './_lib/supabase.js'
  * Navn til slug.
  *
  * Danske bogstaver skal oversættes, ikke smides væk: uden dette bliver
- * "Jammerbugt Rengøring" til "jammerbugt-reng-ring", og to kunder der kun
+ * "Skovgård Rengøring" til "skovg-rd-reng-ring", og to kunder der kun
  * adskiller sig ved et ø får samme slug.
  */
 function lavSlug(navn) {

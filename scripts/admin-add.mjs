@@ -60,7 +60,7 @@ async function main() {
   if (!orgs?.length) {
     throw new Error(
       'Der findes ingen organisationer endnu. Opret den første:\n' +
-        '  npm run org:opret "Jammerbugt Rengøring"',
+        '  npm run org:opret "Dit firma"',
     )
   }
 

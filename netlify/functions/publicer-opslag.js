@@ -19,6 +19,8 @@ async function orgForOpslag(opslagId) {
   return data?.brands?.customers?.organisation_id ?? null
 }
 
+const PLATFORMNAVN = { facebook: 'Facebook', instagram: 'Instagram', linkedin: 'LinkedIn' }
+
 export default async function handler(req) {
   if (req.method !== 'POST') return jsonSvar({ fejl: 'Kun POST.' }, 405)
 
@@ -57,8 +59,14 @@ export default async function handler(req) {
       besked: fejlede.length
         ? fejlede.map((f) => `${f.kanalNavn ?? f.platform}: ${f.fejl}`).join(' · ')
         : tørkørsel()
-          ? 'Tørkørsel: opslaget blev skrevet til loggen. Der gik intet til Meta.'
-          : `Publiceret til ${resultater.map((r) => r.platform).join(' og ')}.`,
+          ? `Tørkørsel: opslaget blev skrevet til loggen. Der gik intet til ${
+              [...new Set(resultater.map((r) => PLATFORMNAVN[r.platform] ?? r.platform))]
+                .join(' eller ')
+            }.`
+          : `Publiceret til ${
+              [...new Set(resultater.map((r) => PLATFORMNAVN[r.platform] ?? r.platform))]
+                .join(' og ')
+            }.`,
     })
   } catch (e) {
     console.error('Publicering fejlede:', e)

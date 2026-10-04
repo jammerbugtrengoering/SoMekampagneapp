@@ -21,7 +21,7 @@ const env = { ...laesEnv(), ...process.env };
 const PLATFORME = {
   facebook: "Facebook Side",
   instagram: "Instagram",
-  linkedin: "LinkedIn (ikke aktiv endnu)",
+  linkedin: "LinkedIn",
 };
 
 function klient() {

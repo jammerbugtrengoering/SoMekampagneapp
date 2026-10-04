@@ -329,6 +329,9 @@ async function main() {
         byggOmskrivOpgave({
           brand, kampagne, instruks,
           opslag: beroerte.map((o) => ({ ...o, tekst: o.body })),
+          // Kampagnen baerer sit sprog. Uden det ville en engelsk serie
+          // komme tilbage paa dansk foerste gang den blev rettet herfra.
+          sprog: kampagne.sprog,
         }),
         OMSKRIV_SKEMA,
         env.CLAUDE_MODEL,
@@ -380,6 +383,7 @@ async function main() {
       byggOpgave({
         brand, navn: kampagne.name, brief: nyBrief, maal: kampagne.goal ?? "",
         antal, kanaler, start, slut: kampagne.ends_on ?? "",
+        sprog: kampagne.sprog,
       }),
       KAMPAGNE_SKEMA,
       env.CLAUDE_MODEL,
