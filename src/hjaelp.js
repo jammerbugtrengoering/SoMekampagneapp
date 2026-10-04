@@ -57,6 +57,7 @@ export const HJAELP = {
       ["Fanerne", "Alle, Afventer, Godkendt, Publiceret. «Afventer» er alt det der ikke er sluppet igennem endnu."],
       ["Markér flere", "sæt flueben og godkend dem samlet. Opslag der mangler et billede til Instagram springes over, og du får det at vide."],
       ["Forhåndsvis", "viser opslaget som det ser ud i feedet, inklusive hvor teksten bliver klippet på mobil."],
+      ["Links og QR-kode", "på Facebook kan man trykke på et link i teksten. På Instagram kan man ikke, så linjer med links tages ud dér, og forhåndsvisningen viser det. Vil du have en vej ind fra Instagram, så lav billedet under «Skabelon» med en QR-kode — den kommer nederst til højre."],
       ["Ret kampagnen", "skriv serien om, flyt den i tid, skift kanaler, lav en artikel — eller slet den."],
       ["Artikel", "samler hele serien til ét stykke du kan lægge i LinkedIns «Write article»."],
     ],

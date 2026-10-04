@@ -1,6 +1,7 @@
 import { dekrypter } from './krypto.js'
 import { testLinkedIn, udgivLinkedIn } from './linkedin.js'
 import { tørkørsel } from './miljo.js'
+import { tekstTilKanal } from '../../../src/kanalregler.js'
 
 /**
  * Publicering til Facebook Page og Instagram via Graph API.
@@ -356,7 +357,6 @@ export async function publicerOpslag(klient, opslagId) {
     await klient.from('posts').update({ status: 'publishing' }).eq('id', opslagId)
   }
 
-  const tekst = tekstMedTags(opslag)
   const resultater = []
 
   for (const m of maal) {
@@ -370,8 +370,10 @@ export async function publicerOpslag(klient, opslagId) {
         .eq('id', m.id)
     }
 
+    // Teksten er pr. kanal: Instagram kan ikke klikke på links, så linjer med
+    // links tages ud dér — se tekstTilKanal.
     const res = await publicerTilKanal(kanal, {
-      tekst,
+      tekst: tekstTilKanal(opslag, kanal.platform),
       billedUrl: opslag.image_url ?? undefined,
     })
     resultater.push({ ...res, kanalNavn: kanal.display_name })

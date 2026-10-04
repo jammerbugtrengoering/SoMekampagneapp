@@ -49,6 +49,49 @@ export function fuldTekst(opslag) {
 }
 
 /**
+ * Billeder med en QR-kode i hjørnet får «-qr» i filnavnet (se uploadBillede).
+ *
+ * Det er en navngivning og ikke en kolonne, fordi både forhåndsvisningen og
+ * serverfunktionen skal kunne se det ud fra image_url alene — uden et ekstra
+ * opslag i assets og uden en migration, der skal køres i hånden.
+ */
+export const harQr = (billedUrl) => /-qr\.[a-z]+(\?|$)/i.test(billedUrl ?? "");
+
+const URL_I_TEKST = /https?:\/\/\S+/;
+
+/**
+ * Teksten som den faktisk bliver sendt til én kanal.
+ *
+ * Facebook beholder linkene: de bliver klikbare i teksten.
+ * Instagram gør dem ikke klikbare, så en linje med et link er bare støj — og
+ * en linje som «Bliv ringet op:» uden sit link er værre end ingenting. Hele
+ * linjen tages derfor ud. Står der en QR-kode i billedet, sættes en linje ind
+ * på det sted, hvor den første var, så læseren ved, at koden er vejen.
+ *
+ * Teksten i databasen røres ikke; det er kun det, der sendes, og det, der
+ * vises i forhåndsvisningen.
+ */
+export function tekstTilKanal(opslag, platform) {
+  if (platform !== "instagram") return fuldTekst(opslag);
+
+  const linjer = String(opslag.body ?? "").split("\n");
+  const ud = [];
+  let fjernet = false;
+
+  for (const linje of linjer) {
+    if (!URL_I_TEKST.test(linje)) { ud.push(linje); continue; }
+    if (!fjernet && harQr(opslag.image_url)) ud.push("Scan koden i billedet.");
+    fjernet = true;
+  }
+
+  const krop = ud.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return fuldTekst({ ...opslag, body: krop });
+}
+
+/** Har teksten links, som Instagram ikke kan gøre klikbare? */
+export const harLinks = (opslag) => URL_I_TEKST.test(opslag.body ?? "");
+
+/**
  * Deler teksten hvor kanalen klipper.
  *
  * Klipper på nærmeste ordgrænse frem for midt i et ord, ligesom
@@ -185,7 +228,7 @@ export function tjekOpslag(opslag, platform) {
   const r = REGLER[platform];
   if (!r) return [];
 
-  const tekst = fuldTekst(opslag);
+  const tekst = tekstTilKanal(opslag, platform);
   const antalTags = (opslag.hashtags ?? []).length;
   const advarsler = [];
 
@@ -226,6 +269,14 @@ export function tjekOpslag(opslag, platform) {
   }
 
   advarsler.push(...tjekKrog(opslag.body, platform));
+
+  if (platform === "instagram" && harLinks(opslag)) {
+    advarsler.push(
+      harQr(opslag.image_url)
+        ? { grad: "note", tekst: "Links er taget ud af Instagram-teksten, fordi de ikke kan klikkes. Koden i billedet er vejen ind." }
+        : { grad: "advarsel", tekst: "Links er taget ud af Instagram-teksten, fordi de ikke kan klikkes — og billedet har ingen QR-kode. Lav billedet med QR-kode under Skabelon, ellers står læseren uden en vej ind." },
+    );
+  }
 
   if (platform === "instagram" && !antalTags) {
     advarsler.push({

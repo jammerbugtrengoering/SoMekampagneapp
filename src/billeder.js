@@ -1,4 +1,5 @@
 import { supabase } from "./supabaseClient";
+import { qrModuler } from "./qr";
 
 /* =====================================================================
    Billeder: skabeloner tegnet i browseren, og upload til den offentlige
@@ -158,6 +159,7 @@ export async function tegnSkabelon({
   overskrift = "",
   underTekst = "",
   logoUrl = null,
+  qrUrl = null,
 }) {
   const { b, h } = FORMATER[format] ?? FORMATER.kvadrat;
 
@@ -209,13 +211,45 @@ export async function tegnSkabelon({
     }
   }
 
-  // ---- Tekst forneden ----
+  // ---- QR-kode nederst til højre ----
+  // Tegnes først, så teksten kan vide hvor meget plads der er tilbage.
+  // Hvid flade med fire moduler luft rundt om: uden den "stille zone" kan en
+  // telefon ikke se, hvor koden begynder, og et mørkt foto bag koden gør den
+  // ulæselig. Det opdager man først, når en kunde forsøger at scanne.
   const bund = h - margin;
   let y = bund;
+  let tekstBredde = indhold;
+  let qrTop = null;
+
+  if (qrUrl) {
+    const moduler = qrModuler(qrUrl);
+    const luft = 4;
+    const felter = moduler.length + luft * 2;
+    // Hele moduler i pixels: en brøkdel giver uskarpe kanter, og skarpe kanter
+    // er det scannere lever af.
+    const modul = Math.max(3, Math.floor((b * 0.24) / felter));
+    const side = modul * felter;
+    const x0 = b - margin - side;
+    const y0 = bund - side;
+
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(x0, y0, side, side);
+    ctx.fillStyle = "#000000";
+    for (let r = 0; r < moduler.length; r++) {
+      for (let c = 0; c < moduler.length; c++) {
+        if (moduler[r][c]) ctx.fillRect(x0 + (c + luft) * modul, y0 + (r + luft) * modul, modul, modul);
+      }
+    }
+
+    qrTop = y0;
+    tekstBredde = indhold - side - margin * 0.5;
+  }
+
+  // ---- Tekst forneden ----
 
   if (underTekst.trim()) {
     const { stoerrelse, linjer, linjehoejde } = passendeSkrift(
-      ctx, underTekst.trim(), indhold, h * 0.16, Math.round(b * 0.042), 500,
+      ctx, underTekst.trim(), tekstBredde, h * 0.16, Math.round(b * 0.042), 500,
     );
     ctx.fillStyle = baggrundUrl ? "rgba(255,255,255,0.88)" : "rgba(255,255,255,0.82)";
     ctx.font = `500 ${stoerrelse}px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
@@ -226,6 +260,10 @@ export async function tegnSkabelon({
     }
     y -= stoerrelse * 0.5;
   }
+
+  // Overskriften står over koden, ikke ved siden af: den er det største på
+  // billedet og må ikke presses ned i en smal kolonne.
+  if (qrTop !== null) y = Math.min(y, qrTop - margin * 0.5);
 
   if (overskrift.trim()) {
     const maksHoejde = y - logoBund - margin * 0.5;
@@ -328,11 +366,13 @@ const endelse = (type) =>
  * pege på det billede der faktisk blev publiceret.
  */
 export async function uploadBillede({
-  brandId, blob, kilde = "upload", altTekst = null, opskrift = null, filnavn = null,
+  brandId, blob, kilde = "upload", altTekst = null, opskrift = null, filnavn = null, qr = false,
 }) {
   const type = blob.type || "image/jpeg";
   const id = crypto.randomUUID();
-  const sti = `${brandId}/${id}.${endelse(type)}`;
+  // «-qr» i filnavnet er det eneste, der fortæller opslaget, at billedet har
+  // en kode — se harQr i kanalregler.js.
+  const sti = `${brandId}/${id}${qr ? "-qr" : ""}.${endelse(type)}`;
 
   const { error: uploadFejl } = await supabase.storage
     .from(BUCKET)

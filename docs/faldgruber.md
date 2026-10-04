@@ -63,3 +63,20 @@ Nu rydder alle felter i briefen prompten, og `antalAfvigelse` i `prompt.js` stop
 oprettelsen, hvis svaret har et andet antal end bedt om. Andet tryk med samme svar
 opretter alligevel. Ved «Ny brief» på en eksisterende kampagne er det vigtigst: de
 gamle opslag slettes, før de nye oprettes. Test i `test-omskrivning.mjs`.
+
+## Et link i en Instagram-tekst ligner et link, men er det ikke (4.10.2026)
+
+Kampagnebriefen bad om «Bliv ringet op: https://…/bestil» og «Skriv til os på
+Messenger: https://m.me/…». På Facebook virker det. På Instagram bliver
+linkene stående som almindelig tekst, der ikke kan trykkes på, og «QR-koden
+nederst i højre hjørne» var kun en sætning i billedbriefen: appen lavede ingen
+QR-kode.
+
+Nu tages linjer med links ud af Instagram-teksten, og skabelonen kan tegne en
+rigtig kode (`src/qr.js`, `tegnSkabelon`). Forhåndsvisningen advarer, hvis
+linkene er taget ud, og billedet ikke har en kode. Test: `test-kanalregler.mjs`
+og `test-qr.mjs`.
+
+**Den, der omdøber en fil i bucket'en, fjerner mærket «-qr».** Så siger
+Instagram-teksten ikke længere «Scan koden i billedet», selvom koden står i
+billedet. Se `harQr` og beslutning 12.

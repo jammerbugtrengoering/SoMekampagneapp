@@ -16,7 +16,7 @@
     "kanaler": "node scripts/kanal.mjs --liste",
     "db:setup": "node scripts/setup-db.mjs",
     "admin:add": "node scripts/admin-add.mjs",
-    "test": "npm run test:publicering && npm run test:kanalregler && npm run test:omskrivning && npm run test:linkedin && npm run test:billeder && npm run test:planlagt && npm run test:artikel && npm run test:hjaelp",
+    "test": "npm run test:publicering && npm run test:kanalregler && npm run test:omskrivning && npm run test:linkedin && npm run test:billeder && npm run test:qr && npm run test:planlagt && npm run test:artikel && npm run test:hjaelp",
     "test:publicering": "node scripts/test-publicering.mjs",
     "test:kanalregler": "node scripts/test-kanalregler.mjs",
     "test:omskrivning": "node scripts/test-omskrivning.mjs",
@@ -29,6 +29,7 @@
     "org:medlem": "node scripts/org.mjs --medlem",
     "org:fjern": "node scripts/org.mjs --fjern",
     "test:billeder": "node scripts/test-billedudbyder.mjs",
+    "test:qr": "node scripts/test-qr.mjs",
     "test:planlagt": "node scripts/test-planlagt.mjs",
     "test:artikel": "node scripts/test-artikel.mjs",
     "test:hjaelp": "node scripts/test-hjaelp.mjs"
@@ -36,6 +37,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",
     "lucide-react": "^1.25.0",
+    "qrcode-generator": "^2.0.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
@@ -43,6 +45,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "jsqr": "^1.4.0",
     "oxlint": "^1.71.0",
     "vite": "^8.1.1"
   }

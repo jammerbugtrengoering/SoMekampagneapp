@@ -39,6 +39,11 @@ _Sidst opdateret: 2026-10-04 (Jammerbugts kopi) — antal opslag tjekkes, AI-bil
 
 ## Udestående
 
+- **QR-kode og links pr. kanal (4.10.2026): bygget, ikke afprøvet med Meta.**
+  Koden er afkodet fra det tegnede billede i alle tre formater, og teksten pr.
+  kanal er testet. Mangler: et rigtigt opslag til Instagram og Facebook, set
+  på en telefon, og at scanne koden med en rigtig telefon.
+
 - **Fornyelse af LinkedIn-token.** Adgangstokenet holder 60 dage,
   fornyelsestokenet 365 og nulstilles ikke. Der er ingen kørsel der
   fornyer, og ingen advarsel når året nærmer sig. Appen holder op med at

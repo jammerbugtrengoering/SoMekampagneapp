@@ -143,11 +143,42 @@ fortæller sandheden om hvad det er.
 
 ---
 
-## 11 · Fire afhængigheder i drift
+## 11 · Fem afhængigheder i drift
 
-React, react-dom, `@supabase/supabase-js`, lucide-react. Krypteringen,
-LinkedIn-klienten, Meta-klienten, billedbehandlingen og prompterne er
-skrevet i projektet.
+React, react-dom, `@supabase/supabase-js`, lucide-react og
+`qrcode-generator` (siden 4.10.2026). Krypteringen, LinkedIn-klienten,
+Meta-klienten, billedbehandlingen og prompterne er skrevet i projektet.
 
 Det er et valg. Hver pakke er noget der skal holdes ved lige, og appen har
 ikke brug for flere. Overvej det samme før den næste tilføjes.
+
+QR-koder kom med, fordi en QR-kode ikke er noget man skriver selv: Reed-Solomon
+og maskevalg er præcis den slags, der ser rigtigt ud og ikke kan scannes.
+`qrcode-generator` er valgt, fordi den har ingen egne afhængigheder og er
+synkron. Til tests ligger `jsqr` som dev-afhængighed, så en kode afkodes af en
+uafhængig læser og ikke af den, der lavede den.
+
+---
+
+## 12 · Links og QR-kode: teksten er pr. kanal, billedet er fælles (4.10.2026)
+
+Et opslag har én tekst og ét billede, men kanalerne kan ikke det samme.
+Facebook gør links i teksten klikbare. Instagram gør det ikke, så et link dér
+er støj, og en etiket som «Bliv ringet op:» uden sit link er værre.
+
+`tekstTilKanal` i `kanalregler.js` bruges både af forhåndsvisningen og af
+publiceringen. Facebook og LinkedIn får teksten uændret. Instagram får alle
+linjer med et link taget ud (hele linjen, ikke kun linket). Er der en QR-kode i
+billedet, står der «Scan koden i billedet.» der, hvor den første linje stod.
+Teksten i databasen røres ikke.
+
+Om billedet har en kode, står i **filnavnet**: `…-qr.jpg` (`harQr`). Det er en
+navngivning og ikke en kolonne, fordi forhåndsvisning og server kun har
+`image_url`, og fordi en kolonne kræver en migration, der køres i hånden mod
+Jammerbugts database. Prisen er, at et billede, der omdøbes i bucket'en, mister
+mærket. Skabelonen (Billede → Skabelon) lægger koden nederst til højre med
+linket fra opslagsteksten som udgangspunkt.
+
+Facebook får samme billede og dermed også koden. Det er overflødigt men
+harmløst, og alternativet var to billeder pr. opslag.
+

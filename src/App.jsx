@@ -14,7 +14,7 @@ import {
   byggPrompt, flytDage, gaeldendeRetningslinjer, laesArtikel, laesCoverBrief,
   laesOmskrivning, laesOpslag, tidspunkt,
 } from "./prompt";
-import { REGLER, fuldTekst, klip, tjekOpslag } from "./kanalregler";
+import { REGLER, tekstTilKanal, klip, tjekOpslag } from "./kanalregler";
 import { HJAELP, HJAELP_STANDARD } from "./hjaelp";
 
 /* =====================================================================
@@ -3703,7 +3703,7 @@ function Forhaandsvisning({ liste, startIndex, brandFor, artikel, artikelCover, 
   if (!opslag) return null;
 
   const regel = REGLER[platform];
-  const tekst = fuldTekst(opslag);
+  const tekst = tekstTilKanal(opslag, platform);
   const graense = visning === "mobil" ? regel.klipMobil : regel.klipDesktop;
   const { synlig, skjult, klippet } = klip(tekst, graense);
   const advarsler = tjekOpslag(opslag, platform);
@@ -3935,7 +3935,7 @@ function BilledVaelger({ brand, opslag, visToast, onValgt, onLuk, startFormat })
     setVenter(kilde);
     try {
       const { url } = await uploadBillede({
-        brandId: brand.id, blob, kilde, opskrift, filnavn,
+        brandId: brand.id, blob, kilde, opskrift, filnavn, qr: !!opskrift?.qrUrl,
         altTekst: opslag ? foersteLinje(opslag.body, 120) : null,
       });
       await onValgt(url);
@@ -4050,12 +4050,15 @@ function SkabelonFane({ brand, opslag, arkiv, venter, onGem, startFormat }) {
   const [baggrund, setBaggrund] = useState("");
   const [overskrift, setOverskrift] = useState(() => foersteLinje(opslag?.body ?? "", 90));
   const [under, setUnder] = useState("");
+  // Linket i opslagsteksten er det naturlige at lægge i koden. Står der flere,
+  // er det det første — det er dér opfordringen står. Kan rettes eller tømmes.
+  const [qrUrl, setQrUrl] = useState(() => (opslag?.body ?? "").match(/https?:\/\/[^\s]+/)?.[0] ?? "");
   const [forhaandsvisning, setForhaandsvisning] = useState(null);
   const [tegner, setTegner] = useState(false);
   const [tegnefejl, setTegnefejl] = useState("");
 
   const fotos = arkiv.filter((a) => a.source !== "skabelon");
-  const opskrift = { format, baggrund, overskrift, under };
+  const opskrift = { format, baggrund, overskrift, under, qrUrl: qrUrl.trim() };
 
   const tegn = useCallback(async () => {
     setTegner(true); setTegnefejl("");
@@ -4067,6 +4070,7 @@ function SkabelonFane({ brand, opslag, arkiv, venter, onGem, startFormat }) {
         accentFarve: brand.colors?.accent ?? "#FFFFFF",
         overskrift, underTekst: under,
         logoUrl: brand.logo_url || null,
+        qrUrl: qrUrl.trim() || null,
       });
       setForhaandsvisning({ blob, url: URL.createObjectURL(blob) });
     } catch (e) {
@@ -4075,7 +4079,7 @@ function SkabelonFane({ brand, opslag, arkiv, venter, onGem, startFormat }) {
     } finally {
       setTegner(false);
     }
-  }, [format, baggrund, overskrift, under, brand]);
+  }, [format, baggrund, overskrift, under, qrUrl, brand]);
 
   // Ryd op efter object-URL'er, ellers holder browseren på hver eneste
   // forhåndsvisning indtil fanen lukkes.
@@ -4114,6 +4118,12 @@ function SkabelonFane({ brand, opslag, arkiv, venter, onGem, startFormat }) {
         <Felt mrk="Underrubrik (valgfri)">
           <input style={styles.input} value={under} onChange={(e) => setUnder(e.target.value)}
             placeholder="fx Ring 43 22 18 04" />
+        </Felt>
+
+        <Felt mrk="QR-kode (valgfri)"
+          hjaelp="Kommer nederst til højre. Brug den, hvor teksten har et link — på Instagram kan man ikke klikke på links, men man kan scanne en kode. Tøm feltet for at undvære den.">
+          <input style={styles.input} value={qrUrl} onChange={(e) => setQrUrl(e.target.value)}
+            placeholder="https://…" inputMode="url" />
         </Felt>
 
         <button style={styles.secondaryBtn} onClick={tegn} disabled={tegner}>
