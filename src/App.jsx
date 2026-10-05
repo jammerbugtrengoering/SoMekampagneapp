@@ -226,13 +226,49 @@ function AppMedSession() {
   const [session, setSession] = useState(null);
   const [klar, setKlar] = useState(false);
   const [nulstil, setNulstil] = useState(false);
+  const [linkFejl, setLinkFejl] = useState("");
 
   useEffect(() => {
     // Kommer man fra et "nulstil adgangskode"-link, ligger tokenet i
     // hash-fragmentet. detectSessionInUrl er slået fra, så vi tager det selv.
     const hash = new URLSearchParams(window.location.hash.slice(1));
     const type = hash.get("type");
-    const token = hash.get("token_hash") ?? hash.get("access_token");
+    const rydAdresse = () => window.history.replaceState({}, "", window.location.pathname);
+
+    // Standardlinket fra Supabase kommer tilbage med BÅDE access_token og
+    // refresh_token i hash-fragmentet. Klienten læser det ikke selv
+    // (detectSessionInUrl er slået fra), så sessionen skal sættes her.
+    //
+    // 5.10.2026: det gjorde appen ikke. Formularen «Vælg ny adgangskode» blev vist,
+    // men der var ingen session bag den, så updateUser fejlede med «Auth session
+    // missing», og Charlotte kunne ikke ændre sin adgangskode. Linket var godt nok:
+    // databasen noterede hendes login 23 sekunder efter, at mailen var sendt.
+    if (hash.get("access_token") && hash.get("refresh_token")) {
+      supabase.auth
+        .setSession({ access_token: hash.get("access_token"), refresh_token: hash.get("refresh_token") })
+        .then(({ data, error }) => {
+          rydAdresse();
+          if (error) {
+            setLinkFejl("Linket er udløbet eller allerede brugt. Bed om et nyt.");
+          } else {
+            setSession(data.session);
+            if (type === "recovery") setNulstil(true);
+          }
+          setKlar(true);
+        });
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((haendelse, s) => {
+        setSession(s);
+        if (haendelse === "PASSWORD_RECOVERY") setNulstil(true);
+      });
+      return () => subscription.unsubscribe();
+    }
+    // Udløbet eller brugt link: Supabase sender fejlen i hash-fragmentet.
+    if (hash.get("error_code") || hash.get("error")) {
+      rydAdresse();
+      setLinkFejl(hash.get("error_code") === "otp_expired"
+        ? "Linket er udløbet eller allerede brugt. Bed om et nyt."
+        : "Linket virkede ikke. Bed om et nyt.");
+    }
 
     if (type === "recovery" && hash.get("token_hash")) {
       supabase.auth
@@ -241,8 +277,6 @@ function AppMedSession() {
           if (!error) setNulstil(true);
           window.history.replaceState({}, "", window.location.pathname);
         });
-    } else if (type === "recovery" && token) {
-      setNulstil(true);
     }
 
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -260,7 +294,7 @@ function AppMedSession() {
 
   if (!klar) return <Fuldskaerm><Loader2 size={20} className="spin" /> Henter…</Fuldskaerm>;
   if (nulstil) return <VaelgAdgangskode onFaerdig={() => setNulstil(false)} />;
-  if (!session) return <LogInd />;
+  if (!session) return <LogInd startFejl={linkFejl} />;
 
   return <Kampagneapp session={session} onLogUd={() => supabase.auth.signOut()} />;
 }
@@ -273,10 +307,10 @@ function Fuldskaerm({ children }) {
   );
 }
 
-function LogInd() {
+function LogInd({ startFejl = "" }) {
   const [email, setEmail] = useState("");
   const [kode, setKode] = useState("");
-  const [fejl, setFejl] = useState("");
+  const [fejl, setFejl] = useState(startFejl);
   const [info, setInfo] = useState("");
   const [venter, setVenter] = useState(false);
 
